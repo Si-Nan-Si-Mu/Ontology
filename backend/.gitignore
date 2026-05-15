@@ -1,0 +1,8 @@
+.env
+*.env.local
+Neo4j-*.txt
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/

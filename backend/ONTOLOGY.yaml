@@ -1,0 +1,544 @@
+# POG — Personality Ontology Graph
+# 语义真源（TBox）；Neo4j 实例（ABox）须符合此处定义的类、属性白名单与关系端点。
+# 版本与迁移： bump meta.schema_version；后端校验拒绝未知类/关系。
+
+meta:
+  name: Personality Ontology Graph
+  short_name: POG
+  schema_version: "0.1.0"
+  description_zh: 人格—社会情境—交互—证据 的领域本体与 Neo4j 映射草案
+
+namespaces:
+  neo4j:
+    # 所有业务节点建议带 Dataset 或 Tenant 前缀属性，此处仅列领域标签
+    default_prefix: ""
+
+# ---------------------------------------------------------------------------
+# 类（TBox）→ Neo4j 节点标签与属性
+# 属性类型：string | int | float | boolean | datetime | string_list | json
+# required：新建时是否必填；indexed：建议建索引/唯一约束
+# ---------------------------------------------------------------------------
+classes:
+  Person:
+    description_zh: 被建模的自然人（自我主体）
+    neo4j:
+      labels: [Person]
+    properties:
+      subject_id:
+        type: string
+        required: true
+        unique: true
+        description_zh: 系统内稳定主键 UUID
+      display_name:
+        type: string
+        required: false
+      created_at:
+        type: datetime
+        required: true
+      updated_at:
+        type: datetime
+        required: false
+      tenant_id:
+        type: string
+        required: false
+        description_zh: 多租户隔离
+      notes:
+        type: string
+        required: false
+        description_zh: 内部备注，不对终端用户默认展示
+
+  Persona:
+    description_zh: 同一人在特定场景下的人格切片，用于多面建模与版本对比
+    neo4j:
+      labels: [Persona]
+    properties:
+      persona_id:
+        type: string
+        required: true
+        unique: true
+      scenario:
+        type: string
+        required: true
+        description_zh: 如 work / family / online_game
+      version:
+        type: string
+        required: false
+        description_zh: 语义版本或整数版本字符串
+      is_default:
+        type: boolean
+        required: false
+        default: false
+      valid_from:
+        type: datetime
+        required: false
+      valid_to:
+        type: datetime
+        required: false
+
+  SocialIdentity:
+    description_zh: 社会身份（职业角色、组织成员、家庭角色等）
+    neo4j:
+      labels: [SocialIdentity]
+    properties:
+      identity_id:
+        type: string
+        required: true
+        unique: true
+      role_name:
+        type: string
+        required: true
+      institution:
+        type: string
+        required: false
+      valid_from:
+        type: datetime
+        required: false
+      valid_to:
+        type: datetime
+        required: false
+
+  Agent:
+    description_zh: 与 Person 互动的他者（自然人、群体、机器人等）
+    neo4j:
+      labels: [Agent]
+    properties:
+      agent_id:
+        type: string
+        required: true
+        unique: true
+      display_name:
+        type: string
+        required: true
+      agent_type:
+        type: string
+        required: true
+        enum_ref: enums.agent_type
+      aliases:
+        type: string_list
+        required: false
+      external_ref:
+        type: string
+        required: false
+        description_zh: 外部系统主键，可选
+
+  Interaction:
+    description_zh: 一次可定位的交互事件（会话、会议、冲突等）
+    neo4j:
+      labels: [Interaction]
+    properties:
+      interaction_id:
+        type: string
+        required: true
+        unique: true
+      interaction_key:
+        type: string
+        required: false
+        unique: true
+        description_zh: 幂等键，可由人/渠道/时间/摘要归一化生成
+      channel:
+        type: string
+        required: true
+        enum_ref: enums.channel
+      timestamp:
+        type: datetime
+        required: true
+      end_timestamp:
+        type: datetime
+        required: false
+      summary:
+        type: string
+        required: false
+      sentiment_summary:
+        type: string
+        required: false
+        enum_ref: enums.sentiment_polarity
+      source_uri:
+        type: string
+        required: false
+        description_zh: 原始文件或对象存储指针
+
+  Utterance:
+    description_zh: 交互中的话语/消息单元
+    neo4j:
+      labels: [Utterance]
+    properties:
+      utterance_id:
+        type: string
+        required: true
+        unique: true
+      utterance_key:
+        type: string
+        required: false
+        unique: true
+      interaction_id:
+        type: string
+        required: true
+      sequence:
+        type: int
+        required: true
+      speaker_agent_id:
+        type: string
+        required: true
+        description_zh: 指向 Agent.agent_id 或 Person 的 subject_id（实现约定二选一，建议统一为 Agent 含 self 节点）
+      text:
+        type: string
+        required: true
+      lang:
+        type: string
+        required: false
+        default: "zh"
+      embedding_id:
+        type: string
+        required: false
+        description_zh: 向量库外键
+
+  TraitHypothesis:
+    description_zh: 对心理构念的推断节点，非临床诊断事实
+    neo4j:
+      labels: [TraitHypothesis]
+    properties:
+      hypothesis_id:
+        type: string
+        required: true
+        unique: true
+      model:
+        type: string
+        required: true
+        description_zh: 如 Big5 / HEXACO / custom
+      facet:
+        type: string
+        required: true
+        description_zh: 如 openness / extraversion 或自定义 facet 代码
+      score:
+        type: float
+        required: false
+        description_zh: 若模型输出连续分数
+      level:
+        type: string
+        required: false
+        enum_ref: enums.trait_level
+      confidence:
+        type: float
+        required: true
+        description_zh: 0.0–1.0
+      extractor_version:
+        type: string
+        required: true
+      created_at:
+        type: datetime
+        required: true
+
+  Evidence:
+    description_zh: 支撑假设的可定位证据
+    neo4j:
+      labels: [Evidence]
+    properties:
+      evidence_id:
+        type: string
+        required: true
+        unique: true
+      evidence_key:
+        type: string
+        required: false
+        unique: true
+      source_uri:
+        type: string
+        required: false
+      span_start:
+        type: int
+        required: false
+      span_end:
+        type: int
+        required: false
+      quote:
+        type: string
+        required: false
+        description_zh: 短引文，便于 UI 展示
+      extractor_version:
+        type: string
+        required: true
+
+  Goal:
+    description_zh: 个体陈述或推断的目标，用于干预与反事实推演
+    neo4j:
+      labels: [Goal]
+    properties:
+      goal_id:
+        type: string
+        required: true
+        unique: true
+      description:
+        type: string
+        required: true
+      priority:
+        type: int
+        required: false
+
+  Stressor:
+    description_zh: 压力源或情境负荷
+    neo4j:
+      labels: [Stressor]
+    properties:
+      stressor_id:
+        type: string
+        required: true
+        unique: true
+      description:
+        type: string
+        required: true
+      severity:
+        type: int
+        required: false
+        description_zh: 1–5 或实现自定义
+
+  Conflict:
+    description_zh: 记录抽取或融合时的冲突，供审计与人工消解
+    neo4j:
+      labels: [Conflict]
+    properties:
+      conflict_id:
+        type: string
+        required: true
+        unique: true
+      conflict_type:
+        type: string
+        required: true
+        enum_ref: enums.conflict_type
+      detail:
+        type: json
+        required: false
+      created_at:
+        type: datetime
+        required: true
+
+# ---------------------------------------------------------------------------
+# 关系（TBox）→ Neo4j 关系类型；from_class / to_class 限定端点
+# 关系属性 optional_properties 可在边上携带
+# ---------------------------------------------------------------------------
+relationships:
+  REFINES:
+    description_zh: Persona 细化某一 Person
+    from_class: Persona
+    to_class: Person
+    cardinality_hint: many_to_one
+    optional_properties: {}
+
+  HAS_IDENTITY:
+    description_zh: Person 拥有社会身份
+    from_class: Person
+    to_class: SocialIdentity
+    cardinality_hint: many_to_many
+    optional_properties:
+      confidence:
+        type: float
+        required: false
+
+  INTERACTED_IN:
+    description_zh: Person 参与交互（自我视角）
+    from_class: Person
+    to_class: Interaction
+    cardinality_hint: many_to_many
+    optional_properties:
+      role_in_interaction:
+        type: string
+        required: false
+        description_zh: 如 initiator / mediator
+
+  WITH:
+    description_zh: 交互中的参与方（与 Agent）
+    from_class: Interaction
+    to_class: Agent
+    cardinality_hint: many_to_many
+    optional_properties: {}
+
+  SPOKE:
+    description_zh: 可选：Utterance 说话人（若 speaker 不全部用 RELATED_TO 表达）
+    from_class: Utterance
+    to_class: Agent
+    cardinality_hint: many_to_one
+    optional_properties: {}
+
+  CONTAINS:
+    description_zh: 交互包含话语
+    from_class: Interaction
+    to_class: Utterance
+    cardinality_hint: one_to_many
+    optional_properties: {}
+
+  RELATED_TO:
+    description_zh: Person 与 Agent 之间的稳定社会关系摘要边
+    from_class: Person
+    to_class: Agent
+    cardinality_hint: many_to_many
+    optional_properties:
+      relation_type:
+        type: string
+        required: true
+        description_zh: 如 colleague / family / friend
+      strength:
+        type: float
+        required: false
+        description_zh: 0.0–1.0 主观或模型强度
+      sentiment:
+        type: string
+        required: false
+        enum_ref: enums.sentiment_polarity
+      valid_from:
+        type: datetime
+        required: false
+      valid_to:
+        type: datetime
+        required: false
+
+  ABOUT:
+    description_zh: 假设所描述的主体（通常 Person 或 Persona）
+    from_class: TraitHypothesis
+    to_class: Person
+    cardinality_hint: many_to_one
+    optional_properties: {}
+
+  ABOUT_PERSONA:
+    description_zh: 假设针对某一切片人格（与 ABOUT 二选一或并存）
+    from_class: TraitHypothesis
+    to_class: Persona
+    cardinality_hint: many_to_one
+    optional_properties: {}
+
+  SUPPORTED_BY:
+    description_zh: 假设由证据支撑
+    from_class: TraitHypothesis
+    to_class: Evidence
+    cardinality_hint: one_to_many
+    optional_properties:
+      support_strength:
+        type: float
+        required: false
+
+  ANCHORED_AT:
+    description_zh: 证据锚定到具体话语
+    from_class: Evidence
+    to_class: Utterance
+    cardinality_hint: many_to_one
+    optional_properties: {}
+
+  HAS_GOAL:
+    description_zh: Person 或 Persona 关联目标
+    from_class: Person
+    to_class: Goal
+    cardinality_hint: one_to_many
+    optional_properties: {}
+  PERSONA_HAS_GOAL:
+    description_zh: Persona 关联目标（若目标随场景变化）
+    from_class: Persona
+    to_class: Goal
+    cardinality_hint: one_to_many
+    optional_properties: {}
+
+  UNDER_STRESS:
+    description_zh: Person/Persona 与压力源
+    from_class: Person
+    to_class: Stressor
+    cardinality_hint: many_to_many
+    optional_properties: {}
+  PERSONA_UNDER_STRESS:
+    from_class: Persona
+    to_class: Stressor
+    cardinality_hint: many_to_many
+    optional_properties: {}
+
+  INVOLVES_CONFLICT:
+    description_zh: 冲突节点挂接到实体
+    from_class: Conflict
+    to_class: Person
+    cardinality_hint: many_to_many
+    optional_properties: {}
+  # 实现时也可用通用 (n)-[:INVOLVES_CONFLICT]->(Conflict) 反向，此处从简只列 Person
+
+# ---------------------------------------------------------------------------
+# 枚举闭集（校验用）
+# ---------------------------------------------------------------------------
+enums:
+  agent_type:
+    - human
+    - group
+    - bot
+    - unknown
+
+  channel:
+    - im
+    - email
+    - voice_transcript
+    - meeting_notes
+    - social_dm
+    - other
+
+  sentiment_polarity:
+    - positive
+    - neutral
+    - negative
+    - mixed
+    - unknown
+
+  trait_level:
+    - low
+    - medium
+    - high
+    - unknown
+
+  conflict_type:
+    - duplicate_entity
+    - contradictory_trait
+    - schema_violation
+    - temporal_inconsistency
+    - manual_flag
+
+# ---------------------------------------------------------------------------
+# 抽取 JSON 与本体对齐（供 LLM / Pydantic 参考）
+# ---------------------------------------------------------------------------
+extracted_bundle:
+  schema_version: "0.1.0"
+  description_zh: Worker 从单批输入中输出的逻辑文档根对象
+  root_fields:
+    persons:
+      type: list
+      item_class: Person
+      description_zh: 通常长度 1；多人在同一会话中可扩展
+    agents:
+      type: list
+      item_class: Agent
+    interactions:
+      type: list
+      item_class: Interaction
+    utterances:
+      type: list
+      item_class: Utterance
+    identities:
+      type: list
+      item_class: SocialIdentity
+    trait_hypotheses:
+      type: list
+      item_class: TraitHypothesis
+    evidences:
+      type: list
+      item_class: Evidence
+    relationships:
+      type: list
+      description_zh: 每条为 { type, from_ref, to_ref, props }；ref 为临时 id
+      item_shape:
+        type: string
+        from_ref: string
+        to_ref: string
+        props: json
+
+# ---------------------------------------------------------------------------
+# 与外部心理构念对齐（非穷尽）
+# ---------------------------------------------------------------------------
+alignments:
+  BigFive:
+    model_id: Big5
+    facets:
+      - openness
+      - conscientiousness
+      - extraversion
+      - agreeableness
+      - neuroticism

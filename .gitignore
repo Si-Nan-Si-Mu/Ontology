@@ -1,0 +1,8 @@
+# 本地密钥（backend 内另有 .env 规则）
+.env
+backend/.env
+
+# 根目录大体积或敏感聊天导出；确需入库时用 git add -f chat.json
+/chat.json
+
+.DS_Store

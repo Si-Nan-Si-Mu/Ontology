@@ -1,0 +1,49 @@
+/* 共享原子类：各页面 scoped 样式可再叠一层 */
+.po-btn {
+  cursor: pointer;
+  border: 1px solid var(--po-border, #e2e8f0);
+  background: #fff;
+  border-radius: 8px;
+  padding: 0.45rem 0.85rem;
+  font-size: 0.88rem;
+  color: #334155;
+  font-family: inherit;
+}
+
+.po-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.po-btn--primary {
+  background: var(--po-accent, #2563eb);
+  border-color: #1d4ed8;
+  color: #fff;
+}
+
+.po-btn--ghost {
+  background: transparent;
+}
+
+.po-btn--sm {
+  padding: 0.25rem 0.5rem;
+  font-size: 0.75rem;
+}
+
+.po-card {
+  background: var(--po-card, #fff);
+  border: 1px solid var(--po-border, #e2e8f0);
+  border-radius: 12px;
+  padding: 1.25rem 1.35rem;
+  box-shadow: 0 1px 2px rgb(15 23 42 / 4%);
+}
+
+.po-page {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 0 1.25rem 2.5rem;
+}
+
+.po-mono {
+  font-family: ui-monospace, 'Cascadia Code', monospace;
+}
