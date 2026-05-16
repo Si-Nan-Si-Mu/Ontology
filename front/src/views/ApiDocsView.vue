@@ -1,19 +1,69 @@
 <script setup>
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 
-import { publicApiBase } from '@/api/http.js'
+import { downloadPersonaExport } from '@/api/personaExport.js'
+import { apiFetch, publicApiBase } from '@/api/http.js'
 
 const base = computed(() => publicApiBase())
+
+const persons = ref([])
+const personsLoading = ref(false)
+const personsError = ref('')
+const exportSubjectId = ref('')
+const exportError = ref('')
+
+async function loadPersons() {
+  personsError.value = ''
+  personsLoading.value = true
+  try {
+    const data = await apiFetch('/api/v1/persons')
+    persons.value = Array.isArray(data.items) ? data.items : []
+    if (!exportSubjectId.value && persons.value.length) {
+      exportSubjectId.value = persons.value[0].subject_id
+    }
+  } catch (e) {
+    persons.value = []
+    personsError.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    personsLoading.value = false
+  }
+}
+
+async function onExport(format) {
+  exportError.value = ''
+  const sid = exportSubjectId.value.trim()
+  if (!sid) {
+    exportError.value = '请先选择 Person'
+    return
+  }
+  try {
+    await downloadPersonaExport(sid, format)
+  } catch (e) {
+    exportError.value = e instanceof Error ? e.message : String(e)
+  }
+}
 
 const endpoints = computed(() => {
   const b = base.value
   return [
     { name: '健康检查', method: 'GET', path: '/health' },
     { name: 'Neo4j 探活', method: 'GET', path: '/health/neo4j' },
+    { name: 'Person 列表（本体锚点）', method: 'GET', path: '/api/v1/persons' },
+    { name: 'Person 外向子图（可视化用）', method: 'GET', path: '/api/v1/person/{subject_id}/subgraph' },
+    {
+      name: '人格子图导出 JSON',
+      method: 'GET',
+      path: '/api/v1/person/{subject_id}/persona-export?format=json',
+    },
+    {
+      name: '人格子图导出纯文本',
+      method: 'GET',
+      path: '/api/v1/person/{subject_id}/persona-export?format=text',
+    },
     { name: '导入', method: 'POST', path: '/api/v1/ingest' },
     { name: '微信 wx-cli 状态', method: 'GET', path: '/api/v1/wechat/status' },
     { name: '微信会话列表（需 WX_CLI_ENABLED）', method: 'GET', path: '/api/v1/wechat/sessions?limit=30' },
-    { name: '微信按会话导出并导入', method: 'POST', path: '/api/v1/wechat/import-from-session' },
+    { name: '微信按会话导入 Neo4j', method: 'POST', path: '/api/v1/wechat/import-from-session' },
     { name: '微信预分析会话说话人', method: 'POST', path: '/api/v1/wechat/preview-export' },
     { name: '微信解析 JSON 说话人', method: 'POST', path: '/api/v1/wechat/analyze-json' },
     { name: '图节点分页', method: 'GET', path: '/api/v1/graph/nodes?page=1&page_size=20' },
@@ -42,6 +92,22 @@ const curlIngest = computed(
 const curlGraph = computed(
   () => `curl -sS "${base.value}/api/v1/graph/nodes?page=1&page_size=10"`,
 )
+
+const curlPersons = computed(() => `curl -sS "${base.value}/api/v1/persons"`)
+
+const curlSubgraph = computed(() => {
+  const sid = exportSubjectId.value.trim() || 'YOUR_SUBJECT_ID'
+  return `curl -sS "${base.value}/api/v1/person/${encodeURIComponent(sid)}/subgraph"`
+})
+
+const curlExportJson = computed(() => {
+  const sid = exportSubjectId.value.trim() || 'YOUR_SUBJECT_ID'
+  return `curl -sS -o persona.json "${base.value}/api/v1/person/${encodeURIComponent(sid)}/persona-export?format=json"`
+})
+
+onMounted(() => {
+  loadPersons()
+})
 </script>
 
 <template>
@@ -68,11 +134,53 @@ const curlGraph = computed(
       </div>
     </section>
 
+    <section class="po-card export-panel">
+      <h3>人格子图导出</h3>
+      <p class="muted small">
+        按 <code>Person.subject_id</code> 下载当前 <code>last_persona_batch_id</code> 下聚合的人格分析（非原始聊天 JSON）。与「图数据」页的子图可视化同源数据。
+      </p>
+      <div class="export-row">
+        <label class="export-field">
+          <span>选择 Person</span>
+          <select
+            v-model="exportSubjectId"
+            class="export-select"
+            :disabled="personsLoading || !persons.length"
+          >
+            <option v-if="!persons.length" disabled value="">（暂无 Person，请先导入）</option>
+            <option v-for="p in persons" :key="p.subject_id" :value="p.subject_id">
+              {{ p.display_name ? `${p.display_name} · ` : '' }}{{ p.subject_id }}
+            </option>
+          </select>
+        </label>
+        <div class="export-btns">
+          <button
+            type="button"
+            class="po-btn po-btn--primary po-btn--sm"
+            :disabled="!exportSubjectId.trim()"
+            @click="onExport('json')"
+          >
+            下载 JSON
+          </button>
+          <button
+            type="button"
+            class="po-btn po-btn--ghost po-btn--sm"
+            :disabled="!exportSubjectId.trim()"
+            @click="onExport('text')"
+          >
+            下载纯文本
+          </button>
+        </div>
+      </div>
+      <p v-if="personsError" class="error">{{ personsError }}</p>
+      <p v-if="exportError" class="error">{{ exportError }}</p>
+    </section>
+
     <section class="po-card">
       <h3>端点清单</h3>
       <p class="muted small">点击「复制」获得完整 URL，便于粘贴到 Postman / 终端。</p>
       <div class="ep-list">
-        <div v-for="ep in endpoints" :key="ep.path" class="ep">
+        <div v-for="ep in endpoints" :key="ep.name + ep.path" class="ep">
           <div class="ep-main">
             <span class="method">{{ ep.method }}</span>
             <code class="url po-mono">{{ ep.href }}</code>
@@ -96,6 +204,21 @@ const curlGraph = computed(
         <pre class="po-mono curl">{{ curlGraph }}</pre>
         <button type="button" class="po-btn po-btn--sm" @click="copyText(curlGraph)">复制</button>
       </div>
+      <div class="curl-block">
+        <div class="curl-h">Person 列表</div>
+        <pre class="po-mono curl">{{ curlPersons }}</pre>
+        <button type="button" class="po-btn po-btn--sm" @click="copyText(curlPersons)">复制</button>
+      </div>
+      <div class="curl-block">
+        <div class="curl-h">Person 子图（当前下拉所选 subject_id）</div>
+        <pre class="po-mono curl">{{ curlSubgraph }}</pre>
+        <button type="button" class="po-btn po-btn--sm" @click="copyText(curlSubgraph)">复制</button>
+      </div>
+      <div class="curl-block">
+        <div class="curl-h">人格导出 JSON（当前下拉所选）</div>
+        <pre class="po-mono curl">{{ curlExportJson }}</pre>
+        <button type="button" class="po-btn po-btn--sm" @click="copyText(curlExportJson)">复制</button>
+      </div>
     </section>
 
     <section class="po-card checklist">
@@ -117,6 +240,48 @@ const curlGraph = computed(
 <style scoped>
 .api {
   padding-top: 0.25rem;
+}
+
+.export-panel {
+  margin-top: 1rem;
+}
+
+.export-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.75rem;
+  margin-top: 0.5rem;
+}
+
+.export-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.78rem;
+  color: #475569;
+  flex: 1;
+  min-width: min(100%, 220px);
+}
+
+.export-select {
+  font: inherit;
+  padding: 0.45rem 0.5rem;
+  border-radius: 8px;
+  border: 1px solid var(--po-border, #e2e8f0);
+  background: #fff;
+}
+
+.export-btns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.error {
+  color: #b91c1c;
+  font-size: 0.82rem;
+  margin: 0.5rem 0 0;
 }
 
 .quick h2 {

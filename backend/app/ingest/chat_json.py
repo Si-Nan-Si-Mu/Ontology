@@ -7,7 +7,23 @@ from typing import Any
 
 from fastapi import HTTPException
 
-WX_EXPORT_MAX_MESSAGES = 8000
+# Pydantic / API 中 ``limit``、``probe_message_limit`` 的硬上限（与配置可下调的「有效上限」不同）
+ABSOLUTE_MESSAGE_LIST_CAP = 500_000
+
+# 超大 messages 数组时，规范化按块遍历以降低单次循环占用（结果仍合并为全量一次分析）
+_NORMALIZE_SLICE = 8_000
+
+
+def wx_chat_import_max_messages() -> int:
+    """单份导入允许的最大原始消息条数（来自 Settings，夹在 1000 与 ABSOLUTE_MESSAGE_LIST_CAP 之间）。"""
+    from app.config import get_settings
+
+    try:
+        v = int(get_settings().wx_chat_import_max_messages)
+    except (TypeError, ValueError):
+        v = 100_000
+    return max(1_000, min(ABSOLUTE_MESSAGE_LIST_CAP, v))
+
 
 _CONTENT_KEYS = ("content", "text", "body", "message", "msg")
 _SENDER_KEYS = ("sender", "from", "author", "name", "speaker", "user", "nickname")
@@ -89,19 +105,30 @@ def _extract_messages_blob(data: Any) -> tuple[list[Any], str, bool, str]:
 
 
 def normalize_chat_export(data: Any) -> dict[str, Any]:
-    """规范为 ingest 使用的 {chat, is_group, messages, source_format}。"""
+    """规范为 ingest 使用的 {chat, is_group, messages, source_format}。
+
+    超长 ``messages`` 按块调用 ``_normalize_message_item``，合并后仍是一次性全量列表，
+    供 ``build_persona_digest`` 单次分析（不断开为多轮入库）。
+    """
     raw_messages, chat, is_group, source_format = _extract_messages_blob(data)
-    if len(raw_messages) > WX_EXPORT_MAX_MESSAGES:
+    mx = wx_chat_import_max_messages()
+    n_raw = len(raw_messages)
+    if n_raw > mx:
         raise HTTPException(
             status_code=400,
-            detail=f"消息条数超过上限 {WX_EXPORT_MAX_MESSAGES}，请缩小导出范围或分段导入",
+            detail=(
+                f"消息条数 {n_raw} 超过当前上限 {mx}（可在 backend/.env 设置 WX_CHAT_IMPORT_MAX_MESSAGES，"
+                f"绝对上限 {ABSOLUTE_MESSAGE_LIST_CAP}），或缩小 wx export -n / 分段导出。"
+            ),
         )
 
     messages: list[dict[str, Any]] = []
-    for item in raw_messages:
-        norm = _normalize_message_item(item)
-        if norm:
-            messages.append(norm)
+    for start in range(0, n_raw, _NORMALIZE_SLICE):
+        chunk = raw_messages[start : start + _NORMALIZE_SLICE]
+        for item in chunk:
+            norm = _normalize_message_item(item)
+            if norm:
+                messages.append(norm)
 
     if not messages:
         raise HTTPException(status_code=400, detail="未解析到任何有效消息（需含 content/text 等字段）")
@@ -111,7 +138,7 @@ def normalize_chat_export(data: Any) -> dict[str, Any]:
         "is_group": is_group,
         "messages": messages,
         "source_format": source_format,
-        "messages_raw_count": len(raw_messages),
+        "messages_raw_count": n_raw,
         "messages_normalized_count": len(messages),
     }
 

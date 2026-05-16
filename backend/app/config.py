@@ -27,6 +27,14 @@ class Settings(BaseSettings):
     wx_cli_command: str = "wx"
     wx_cli_timeout_sec: int = Field(default=120, ge=10, le=600)
 
+    # 单份聊天 JSON（wx-cli / 上传）允许的最大原始消息条数；规范化后仍一次性送入人格摘要
+    wx_chat_import_max_messages: int = Field(
+        default=100_000,
+        ge=1_000,
+        le=500_000,
+        description="超过则 400；可与 wx-cli 超时一并调大以适配超长会话",
+    )
+
     # DeepSeek（OpenAI 兼容）：https://api-docs.deepseek.com/zh-cn/
     deepseek_enabled: bool = False
     deepseek_api_key: str | None = None

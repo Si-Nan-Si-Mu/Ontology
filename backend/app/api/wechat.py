@@ -10,11 +10,8 @@ from pydantic import BaseModel, Field, field_validator
 
 from app.config import get_settings
 from app.deps import Neo4jDep
-from app.ingest.wx_cli import (
-    WX_EXPORT_MAX_MESSAGES,
-    analyze_wx_cli_export_senders,
-    ingest_wx_cli_export_json,
-)
+from app.ingest.chat_json import ABSOLUTE_MESSAGE_LIST_CAP, wx_chat_import_max_messages
+from app.ingest.wx_cli import analyze_wx_cli_export_senders, ingest_wx_cli_export_json
 from app.wechat_cli.runner import export_chat_json, fetch_sessions_json
 
 router = APIRouter(prefix="/api/v1/wechat", tags=["wechat"])
@@ -40,6 +37,8 @@ def wechat_status() -> dict[str, Any]:
         "wx_cli_command": s.wx_cli_command,
         "wx_cli_timeout_sec": s.wx_cli_timeout_sec,
         "executable_resolves": on_path,
+        "wx_chat_import_max_messages": wx_chat_import_max_messages(),
+        "wx_chat_import_absolute_cap": ABSOLUTE_MESSAGE_LIST_CAP,
     }
 
 
@@ -75,7 +74,7 @@ class PreviewExportBody(BaseModel):
 def wechat_preview_export(body: PreviewExportBody) -> dict[str, Any]:
     _require_wx_cli_enabled()
     s = get_settings()
-    lim = min(body.probe_limit, WX_EXPORT_MAX_MESSAGES)
+    lim = min(body.probe_limit, wx_chat_import_max_messages())
     raw_text = export_chat_json(
         wx_command=s.wx_cli_command,
         chat=body.chat,
@@ -90,7 +89,7 @@ class AnalyzeJsonBody(BaseModel):
     probe_message_limit: int = Field(
         default=800,
         ge=50,
-        le=8000,
+        le=ABSOLUTE_MESSAGE_LIST_CAP,
         description="仅取前 N 条消息统计说话人（大文件探针）；正式导入仍用全文",
     )
 
@@ -107,7 +106,7 @@ def wechat_analyze_json(body: AnalyzeJsonBody) -> dict[str, Any]:
 @router.post("/analyze-json-file")
 async def wechat_analyze_json_file(
     file: UploadFile = File(..., description="聊天 JSON 文件"),
-    probe_message_limit: int = Form(800, ge=50, le=8000),
+    probe_message_limit: int = Form(800, ge=50, le=ABSOLUTE_MESSAGE_LIST_CAP),
 ) -> dict[str, Any]:
     """上传 JSON 文件，仅在服务端读取；用前 N 条消息统计说话人，不把正文回传前端。"""
     name = (file.filename or "").lower()
@@ -136,7 +135,7 @@ class WechatSessionImportBody(BaseModel):
     self_speaker_label: str | None = Field(default=None, max_length=128)
     subject_display_name: str | None = Field(default=None, max_length=256)
     chat: str = Field(..., min_length=1, max_length=200)
-    limit: int = Field(default=500, ge=1, le=WX_EXPORT_MAX_MESSAGES)
+    limit: int = Field(default=500, ge=1, le=ABSOLUTE_MESSAGE_LIST_CAP)
     note: str | None = Field(default=None, max_length=512)
     use_llm: bool = True
 
@@ -155,7 +154,7 @@ def wechat_import_from_session(
 ) -> dict[str, Any]:
     _require_wx_cli_enabled()
     s = get_settings()
-    lim = min(body.limit, WX_EXPORT_MAX_MESSAGES)
+    lim = min(body.limit, wx_chat_import_max_messages())
     raw_text = export_chat_json(
         wx_command=s.wx_cli_command,
         chat=body.chat,

@@ -55,23 +55,23 @@ wx export "好友或群名称" -n 500 --format json > chat.json
 
 重启 API 后：
 
-1. 打开前端 **数据导入** → 来源选 **微信导出**。  
+1. 打开前端 **数据导入** → 来源选 **聊天 JSON**（`wechat_export`）。  
 2. 点击 **加载会话列表**（调用 `wx sessions --json`）。  
-3. 在表格中**单选**一个会话；系统会调用 `preview-export` 用较小 `-n` **预解析说话人**，在下拉框中选择 **本体化 Person** 与 **对话中的我**（`subject_id` 由所选说话人生成 `wxp_<hash>`，与 `sender` 自动对齐）。  
-4. 可选调整 **导出条数**（正式 `wx export -n`，不超过单次上限）。  
-5. 点击 **从 wx-cli 导出并导入**。  
-6. 若改用手动粘贴 JSON：将正文粘贴后点 **解析正文 JSON 中的说话人**，同样在下拉框中选择；需要自定义主键时勾选 **手动填写**。
+3. 在表格中**单选**一个会话；系统会调用 `preview-export` 用较小 `-n`（前端当前为 500 条上限）**预解析说话人**，页面上「共 N 条」指这份预分析样本里的消息数；在下拉框中选择 **本体 Person** 与 **客体 sender**。  
+4. 可选调整 **正式导出条数**（入库时 `wx export -n`；上限由后端 `WX_CHAT_IMPORT_MAX_MESSAGES` 决定，默认 10 万、绝对上限 50 万）；可与预分析条数不同——若希望与当前样本量一致，可点「与当前预分析样本条数对齐」。超长会话请同步增大 `WX_CLI_TIMEOUT_SEC`。  
+5. 滚动到页面底部，点击 **导入聊天 JSON**（将调用 `POST /api/v1/wechat/import-from-session`）。  
+6. 若改用手动粘贴 JSON：将正文粘贴后点 **解析 JSON 中的说话人**，同样在下拉框中选择；需要自定义主键时勾选 **手动填写**。
 
 ### 4B. 手动粘贴 JSON
 
 1. **来源** 选择 **微信导出（wechat_export）**。  
 2. **正文**：粘贴 `chat.json` 的**完整 JSON**。  
-3. 点击 **解析正文 JSON 中的说话人**，在下拉框中选择 **本体化 Person** 与 **对话中的我**（或勾选「手动填写」）。  
+3. 点击 **解析 JSON 中的说话人**，在下拉框中选择 **本体 Person** 与 **客体 sender**（或勾选「手动填写」）。  
 4. 提交 `POST /api/v1/ingest`。
 
 写入语义（当前实现）：`MERGE` `Person` 后创建一批特质节点（`PersonaSummary`、`ExpressionStyleTrait`、`VerbalTicObservation`、`MbtiHypothesisFacet`、`DialogueExemplar`、`PersonaAnalysisMeta`），经 `HAS_*` 关系挂到该 Person；同一 `subject_id` 再次导入会先按 `last_persona_batch_id` 删除旧批次特质子图。Person 上不再保留长 JSON 特质字段（已清空）。不含 `Agent` / `Utterance` 全量对话。
 
-单次导入消息上限见后端常量（当前 8000 条）。
+单次导入消息条数上限见 **`.env` → `WX_CHAT_IMPORT_MAX_MESSAGES`**（默认 100000，绝对上限 500000）；超长导出请同步调大 `WX_CLI_TIMEOUT_SEC`。
 
 ## 5. 常见问题
 
@@ -80,6 +80,7 @@ wx export "好友或群名称" -n 500 --format json > chat.json
 | 以前导入图里出现 `unknown` / `wx_cli_export` | 旧版把空 `sender` 落成 `unknown` Agent，并把渠道写成 `wx_cli_export` 的 `Interaction`；**当前版本不再创建这些节点**，只更新 `Person`。历史脏数据请用 `scripts/neo4j_wipe.py` 或 Cypher 自行清理。 |
 | 422 校验失败 | 检查是否选了 wechat_export、正文是否为合法 JSON |
 | 502 `找不到 … 消息记录` | 会话名与 `wx export` 所需不一致；单字母英文名已自动尝试大小写互换。仍失败请在终端执行 `wx export "会话名" --format json -n 5` 核对名称 |
+| 导入条数与微信「聊天信息」总条数不一致 | **统计口径不同**：① `wx export -n` 与配置上限只是上界，实际 ≤ 会话存量；② 规范化会丢弃<strong>无正文</strong>消息（响应里 `wx_cli.messages_raw_in_export` / `messages_normalized_in_export` / `messages_dropped_no_body`）；③ 人格摘要只用部分消息（`messages_used_for_digest`）。单份 JSON 原始消息上限由 **`WX_CHAT_IMPORT_MAX_MESSAGES`**（默认 10 万）控制，后端规范化按块合并后仍<strong>一次性</strong>全量送入摘要。 |
 | 503（wechat/sessions 等） | 未设置 `WX_CLI_ENABLED=true` 或后端无法调用本机 `wx` |
 | Vite 代理 `ECONNREFUSED 127.0.0.1:8000` | 先在本机启动 API（`uvicorn … --port 8000`），再开前端 `npm run dev` |
 

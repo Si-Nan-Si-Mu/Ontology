@@ -26,9 +26,10 @@ from app.ingest.wx_speakers import (
     suggest_private_chat_roles,
 )
 
-from app.ingest.chat_json import parse_chat_json_text
+from app.ingest.chat_json import ABSOLUTE_MESSAGE_LIST_CAP, parse_chat_json_text
 
-WX_EXPORT_MAX_MESSAGES = 8000
+# 与 wechat API 中 Pydantic ``le=`` 对齐；单次请求实际条数上限为 ``wx_chat_import_max_messages()``（默认 10 万）
+WX_EXPORT_MAX_MESSAGES = ABSOLUTE_MESSAGE_LIST_CAP
 
 
 def parse_wx_cli_export_payload(raw_text: str) -> dict[str, Any]:
@@ -91,10 +92,13 @@ def analyze_wx_cli_export_senders(
             },
         )
     role_hint = suggest_private_chat_roles(chat_name, senders, is_group=is_group)
+    raw_total = int(payload.get("messages_raw_count") or total_norm)
     return {
         "chat": chat_name,
         "is_group": is_group,
         "message_count": total_norm,
+        "messages_raw_in_export": raw_total,
+        "messages_dropped_no_body": max(0, raw_total - total_norm),
         "messages_probed_for_senders": len(scan),
         "senders": senders,
         "source_format": payload.get("source_format"),
@@ -118,6 +122,8 @@ def ingest_wx_cli_export_json(
     """解析 wx-cli JSON：删除该 Person 上一批特质子图后，写入新一批特质节点并连到 Person。"""
     payload = parse_wx_cli_export_payload(raw_text)
     messages: list[Any] = payload["messages"]
+    raw_export_count = int(payload.get("messages_raw_count") or len(messages))
+    normalized_count = int(payload.get("messages_normalized_count") or len(messages))
     chat: str = payload["chat"]
     is_group: bool = payload["is_group"]
     profiled = (profiled_speaker_label or self_speaker_label or "").strip()
@@ -196,6 +202,9 @@ def ingest_wx_cli_export_json(
             "mode": "persona_facet_graph",
             "chat": chat,
             "is_group": is_group,
+            "messages_raw_in_export": raw_export_count,
+            "messages_normalized_in_export": normalized_count,
+            "messages_dropped_no_body": max(0, raw_export_count - normalized_count),
             "messages_in_file": len(messages),
             "messages_used_for_digest": digest["messages_used"],
             "exemplar_thread_count": digest["exemplar_thread_count"],

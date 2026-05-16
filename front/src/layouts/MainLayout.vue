@@ -17,7 +17,7 @@ const items = [
     to: '/graph',
     name: 'graph',
     title: '图数据',
-    subtitle: 'Neo4j 浏览',
+    subtitle: 'Person 子图可视化',
   },
   {
     to: '/api',
@@ -103,9 +103,27 @@ onUnmounted(() => {
       :aria-hidden="false"
       aria-label="侧栏导航"
     >
-      <RouterLink to="/import" class="side-brand" @click="onNavClick">
-        <span class="brand-mark">POG</span>
-        <span class="brand-text">人格本体图控制台</span>
+      <RouterLink
+        to="/import"
+        class="side-brand"
+        aria-label="POG 人格本体图控制台，返回首页"
+        @click="onNavClick"
+      >
+        <div class="brand-row">
+          <img
+            src="/pog-mark.svg"
+            alt=""
+            width="40"
+            height="40"
+            class="brand-logo"
+            decoding="async"
+            aria-hidden="true"
+          />
+          <div class="brand-titles">
+            <span class="brand-wordmark">POG</span>
+            <span class="brand-text">人格本体图控制台</span>
+          </div>
+        </div>
       </RouterLink>
 
       <AppNavLinks :items="items" :current-path="route.path" @after-navigate="onNavClick" />
@@ -129,8 +147,22 @@ onUnmounted(() => {
               />
             </svg>
           </button>
-          <RouterLink to="/import" class="top-brand" @click="closeDrawer">
-            <span class="brand-mark">POG</span>
+          <RouterLink
+            to="/import"
+            class="top-brand"
+            aria-label="返回首页，当前栏目：{{ currentTitle }}"
+            @click="closeDrawer"
+          >
+            <img
+              src="/pog-mark.svg"
+              alt=""
+              width="28"
+              height="28"
+              class="brand-logo brand-logo--top"
+              decoding="async"
+              aria-hidden="true"
+            />
+            <span class="brand-wordmark brand-wordmark--top" aria-hidden="true">POG</span>
             <span class="top-brand-title">{{ currentTitle }}</span>
           </RouterLink>
         </div>
@@ -216,17 +248,36 @@ onUnmounted(() => {
 .side-brand {
   text-decoration: none;
   color: inherit;
-  display: flex;
-  flex-direction: column;
-  gap: 0.15rem;
   padding: 0.15rem 0.25rem;
 }
 
-.brand-mark {
+.brand-row {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.brand-logo {
+  flex-shrink: 0;
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  box-shadow: 0 1px 3px rgb(15 23 42 / 12%);
+}
+
+.brand-titles {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+}
+
+.brand-wordmark {
   font-weight: 800;
-  letter-spacing: 0.06em;
-  font-size: 0.95rem;
-  color: var(--po-accent, #2563eb);
+  letter-spacing: 0.08em;
+  font-size: 1rem;
+  color: var(--po-accent, #4338ca);
+  line-height: 1.1;
 }
 
 .brand-text {
@@ -286,11 +337,26 @@ onUnmounted(() => {
 
 .top-brand {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 0.45rem;
   text-decoration: none;
   color: inherit;
   min-width: 0;
+}
+
+.brand-logo--top {
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  flex-shrink: 0;
+}
+
+.brand-wordmark--top {
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  font-size: 0.82rem;
+  color: var(--po-accent, #4338ca);
+  flex-shrink: 0;
 }
 
 .top-brand-title {
@@ -343,15 +409,26 @@ onUnmounted(() => {
   background: #fff;
 }
 
-/* —— 桌面：固定侧栏，顶栏仅保留品牌行（隐藏汉堡） —— */
+/* —— 桌面：侧栏固定于视口，主列独立滚动 —— */
 @media (min-width: 960px) {
+  .layout {
+    display: block;
+    min-height: 100vh;
+  }
+
   .sidebar {
-    position: relative;
-    transform: none !important;
+    position: fixed;
+    z-index: 100;
+    top: 0;
+    left: 0;
+    bottom: 0;
     width: 232px;
+    transform: none !important;
     flex-shrink: 0;
     box-shadow: none;
-    min-height: 100vh;
+    overflow-y: auto;
+    overflow-x: hidden;
+    -webkit-overflow-scrolling: touch;
   }
 
   .sidebar--open {
@@ -360,6 +437,15 @@ onUnmounted(() => {
 
   .scrim {
     display: none !important;
+  }
+
+  .column {
+    margin-left: 232px;
+    min-width: 0;
+    width: auto;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
   }
 
   .menu-btn {
@@ -374,7 +460,13 @@ onUnmounted(() => {
     pointer-events: none;
   }
 
-  .top-brand .brand-mark {
+  .brand-logo--top {
+    width: 24px;
+    height: 24px;
+    border-radius: 6px;
+  }
+
+  .brand-wordmark--top {
     display: none;
   }
 

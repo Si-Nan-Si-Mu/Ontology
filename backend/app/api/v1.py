@@ -169,6 +169,97 @@ def llm_status() -> dict[str, Any]:
     }
 
 
+@router.get("/persons")
+def list_persons(neo4j: Neo4jDep) -> dict[str, Any]:
+    """列出库中所有 Person 锚点，供前端选择本体化对象。"""
+    rows = neo4j.execute_read(
+        """
+        MATCH (p:Person)
+        RETURN p.subject_id AS subject_id,
+               coalesce(p.display_name, '') AS display_name,
+               p.last_persona_batch_id AS last_persona_batch_id,
+               p.last_persona_analyzed_at AS last_analyzed,
+               elementId(p) AS element_id
+        ORDER BY subject_id
+        """
+    )
+    items: list[dict[str, Any]] = []
+    for r in rows or []:
+        sid = r.get("subject_id")
+        if sid is None or str(sid).strip() == "":
+            continue
+        items.append(
+            {
+                "subject_id": str(sid).strip(),
+                "display_name": str(r.get("display_name") or "").strip(),
+                "last_persona_batch_id": json_safe(r.get("last_persona_batch_id")),
+                "last_persona_analyzed_at": json_safe(r.get("last_analyzed")),
+                "element_id": r.get("element_id"),
+            }
+        )
+    return {"total": len(items), "items": items}
+
+
+@router.get("/person/{subject_id}/subgraph")
+def person_subgraph(neo4j: Neo4jDep, subject_id: str) -> dict[str, Any]:
+    """返回某 Person 外向人格特质子图（Person-(HAS_*)->Facet），用于前端可视化。"""
+    sid = subject_id.strip()
+    if not sid:
+        raise HTTPException(status_code=400, detail="subject_id 不能为空")
+    rows = neo4j.execute_read(
+        """
+        MATCH (p:Person {subject_id: $sid})
+        OPTIONAL MATCH (p)-[r]->(n)
+        WITH p, r, n
+        WITH p,
+             collect(
+               CASE
+                 WHEN r IS NULL THEN null
+                 ELSE {
+                   relationship: type(r),
+                   target_element_id: elementId(n),
+                   target_labels: labels(n),
+                   target_properties: properties(n)
+                 }
+               END
+             ) AS raw
+        RETURN properties(p) AS person_props,
+               elementId(p) AS person_element_id,
+               [e IN raw WHERE e IS NOT NULL] AS edges
+        """,
+        {"sid": sid},
+    )
+    if not rows:
+        raise HTTPException(status_code=404, detail=f"未找到 Person: {sid}")
+    row = rows[0]
+    edges_raw = row.get("edges") or []
+    edges: list[dict[str, Any]] = []
+    for e in edges_raw:
+        if not isinstance(e, dict):
+            continue
+        rel = str(e.get("relationship") or "")
+        if not rel:
+            continue
+        props = e.get("target_properties")
+        edges.append(
+            {
+                "relationship": rel[:64],
+                "target_element_id": e.get("target_element_id"),
+                "target_labels": list(e.get("target_labels") or []),
+                "target_properties": json_safe(props) if props is not None else {},
+            }
+        )
+    return {
+        "subject_id": sid,
+        "person": {
+            "element_id": row.get("person_element_id"),
+            "properties": json_safe(row.get("person_props") or {}),
+        },
+        "edges": edges,
+        "stats": {"facet_node_count": len(edges)},
+    }
+
+
 @router.get("/graph/nodes")
 def graph_nodes(
     neo4j: Neo4jDep,

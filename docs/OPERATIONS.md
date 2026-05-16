@@ -5,27 +5,35 @@
 ## 1. 环境准备
 
 
-| 组件      | 说明                                                                      |
-| ------- | ----------------------------------------------------------------------- |
-| Python  | 建议 3.11+（与 `backend/requirements.txt` 中依赖兼容）                            |
-| Node.js | `front/package.json` 要求 **^20.19.0 或 ≥22.12.0**                         |
-| Neo4j   | 本地 Docker/桌面版 **bolt://127.0.0.1:7687**，或 **Neo4j Aura**（`neo4j+s://…`） |
+| 组件      | 说明                                                                         |
+| ------- | -------------------------------------------------------------------------- |
+| Python  | 建议 3.11+（与 `backend/requirements.txt` 中依赖兼容）                               |
+| Conda   | **推荐**：用独立环境管理后端依赖（示例环境名 `pog`）；避免 Windows 上 `.venv` 路径与 `Activate.ps1` 混淆 |
+| Node.js | `front/package.json` 要求 **^20.19.0 或 ≥22.12.0**                            |
+| Neo4j   | 本地 Docker/桌面版 **bolt://127.0.0.1:7687**，或 **Neo4j Aura**（`neo4j+s://…`）    |
 
 
 在仓库根目录外无需额外全局工具；依赖分别在 `backend` 与 `front` 目录安装。
 
 ## 2. 后端（FastAPI）
 
-### 2.1 安装依赖
+### 2.1 安装依赖（推荐：conda）
 
 ```powershell
 cd D:\Python\Ontology\backend
-python -m venv .venv
-.\.venv\Scripts\activate
+conda create -n pog python=3.11 -y
+conda activate pog
 pip install -r requirements.txt
 ```
 
-（Linux / macOS：`source .venv/bin/activate`）
+- 环境名 `pog` 仅为示例；若已占用可改为 `pog-ontology` 等。  
+- **Linux / macOS**：同样使用 `conda create` / `conda activate`（需已安装 [Miniconda](https://docs.conda.io/en/latest/miniconda.html) 或 Anaconda）。
+
+**备选：`python -m venv`（本仓库不自带 `.venv` 目录）**
+
+- Windows **PowerShell**：`python -m venv .venv` 后执行 `.\.venv\Scripts\Activate.ps1`（若策略限制，可对当前用户放宽执行策略后再试）。  
+- Windows **cmd**：`.\.venv\Scripts\activate.bat`  
+- Linux / macOS：`source .venv/bin/activate`
 
 ### 2.2 配置环境变量
 
@@ -43,7 +51,6 @@ pip install -r requirements.txt
 
 ```powershell
 cd D:\Python\Ontology\backend
-.\.venv\Scripts\activate
 uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
@@ -113,7 +120,6 @@ npm run preview
 
 ```powershell
 cd D:\Python\Ontology\backend
-.\.venv\Scripts\activate
 
 # 仅统计节点数，不写库
 python scripts/neo4j_wipe.py --dry-run

@@ -2,7 +2,6 @@
 import { ref, watch, computed } from 'vue'
 
 import { apiFetch } from '@/api/http.js'
-import { downloadPersonaExport } from '@/api/personaExport.js'
 
 /** 与 `wx export <chat>` 对齐：优先 chat，否则尝试上游返回的其它字段 */
 function sessionExportChat(s) {
@@ -16,7 +15,7 @@ function sessionExportChat(s) {
 }
 
 const steps = [
-  { n: 1, t: '声明本体对象', d: '微信：预分析后从说话人里选 Person 与「我」；其它来源可手填 subject_id' },
+  { n: 1, t: '声明本体对象', d: '微信：预分析后选择本体 Person 与客体 sender；其它来源可手填 subject_id' },
   { n: 2, t: '选择来源并粘贴', d: '纯文本等；微信可本机选会话或粘贴 JSON' },
   { n: 3, t: '提交校验', d: '后端校验后返回受理信息' },
 ]
@@ -30,7 +29,6 @@ const wxMeSpeakerLabel = ref('(空 sender)')
 const note = ref('')
 const ingestResult = ref(null)
 const ingestError = ref('')
-const personaExportError = ref('')
 const ingestLoading = ref(false)
 
 const wxStatus = ref(null)
@@ -41,7 +39,6 @@ const sessionsLoading = ref(false)
 const sessionsError = ref('')
 const selectedChat = ref('')
 const wxImportLimit = ref(500)
-const wxImportLoading = ref(false)
 
 /** 预解析：{ label, count, suggested_subject_id }[] */
 const speakerRows = ref([])
@@ -50,10 +47,11 @@ const speakerMeta = ref({
   message_count: 0,
   is_group: false,
   messages_probed_for_senders: 0,
+  messages_raw_in_export: null,
+  messages_dropped_no_body: null,
 })
 const previewLoading = ref(false)
 const previewError = ref('')
-const selectedSubjectLabel = ref('')
 const selectedProfiledLabel = ref('')
 const selectedMeLabel = ref('(空 sender)')
 const speakerRoleHint = ref('')
@@ -65,27 +63,6 @@ const jsonDragOver = ref(false)
 const isChatJson = computed(
   () => sourceType.value === 'wechat_export' || sourceType.value === 'chat_json',
 )
-
-/** 最近一次成功写入 Neo4j 的 Person.subject_id（用于导出） */
-const exportSubjectId = computed(() => {
-  const r = ingestResult.value
-  if (!r || typeof r !== 'object') return ''
-  const sid = r.wx_cli?.person_subject_id || r.ontology_subject?.subject_id
-  return typeof sid === 'string' ? sid.trim() : ''
-})
-
-const canExportPersona = computed(
-  () => exportSubjectId.value && ingestResult.value?.status === 'done' && ingestResult.value?.wx_cli,
-)
-
-async function onDownloadPersonaExport(format) {
-  personaExportError.value = ''
-  try {
-    await downloadPersonaExport(exportSubjectId.value, format)
-  } catch (e) {
-    personaExportError.value = e instanceof Error ? e.message : String(e)
-  }
-}
 
 const PLACEHOLDER_CHAT_JSON =
   '可选：粘贴一小段 JSON（含 messages）用于补充探针；大文件请只用顶部上传，勿整包粘贴。'
@@ -101,17 +78,28 @@ let previewChatTimer = null
 let previewAbort = null
 let previewSeq = 0
 
-/** 从 wx-cli 一键导入：需已选会话，且（预解析后选好说话人）或勾选手动填写 */
+/** 无上传/正文时，仅靠 wx-cli 会话入库：须已选会话且预分析完成（与底部「导入聊天 JSON」共用条件） */
 const wxImportBlocked = computed(() => {
   if (!selectedChat.value.trim()) return true
-  if (wxImportLoading.value) return true
   if (useManualWxFields.value) {
     return !subjectId.value.trim() || !profiledSpeakerLabel.value.trim()
   }
   if (previewLoading.value) return true
   if (!speakerRows.value.length) return true
-  return !selectedSubjectLabel.value || !selectedProfiledLabel.value
+  return !selectedProfiledLabel.value || !selectedMeLabel.value
 })
+
+/** 聊天 JSON 来源：无文件且无正文时，仅当 wx 会话路径就绪才可点「导入聊天 JSON」 */
+const chatJsonPrimaryBlocked = computed(() => {
+  if (!isChatJson.value) return false
+  if (rawText.value.trim() || jsonFile.value) return false
+  if (!selectedChat.value.trim() || !wxStatus.value?.wx_cli_enabled || !wxStatus.value?.executable_resolves) {
+    return true
+  }
+  return wxImportBlocked.value
+})
+
+const speakerRowsForPick = computed(() => speakerRows.value.filter((r) => !r.is_session_alias))
 
 const sourceCards = [
   {
@@ -122,7 +110,7 @@ const sourceCards = [
   {
     value: 'wechat_export',
     title: '聊天 JSON',
-    body: '上传 .json 或粘贴 wx-cli / 通用 messages 结构；选择被分析对象与本机 sender 后导入 Neo4j。',
+    body: '上传 .json 或粘贴 wx-cli / 通用 messages 结构；选择本体 Person 与客体 sender 后导入 Neo4j。',
   },
   {
     value: 'other',
@@ -132,7 +120,7 @@ const sourceCards = [
 ]
 
 function resolvedSuggestedSubjectId() {
-  const row = speakerRows.value.find((r) => r.label === selectedSubjectLabel.value)
+  const row = speakerRows.value.find((r) => r.label === selectedProfiledLabel.value)
   return row?.suggested_subject_id || ''
 }
 
@@ -151,27 +139,22 @@ function applySpeakerPickDefaults(data) {
     message_count: data.message_count || 0,
     is_group: !!data.is_group,
     messages_probed_for_senders: data.messages_probed_for_senders ?? data.message_count ?? 0,
+    messages_raw_in_export: data.messages_raw_in_export ?? null,
+    messages_dropped_no_body: data.messages_dropped_no_body ?? null,
   }
   speakerRoleHint.value = data.hint || ''
-  const chatRow = speakerRows.value.find((r) => r.is_session_alias)
-  if (chatRow) {
-    selectedSubjectLabel.value = chatRow.label
-    if (!subjectDisplayName.value.trim()) {
-      subjectDisplayName.value = chatRow.label
-    }
-  } else if (speakerRows.value.length === 1) {
-    selectedSubjectLabel.value = speakerRows.value[0].label
-  } else {
-    selectedSubjectLabel.value = ''
-  }
+  const nonAlias = speakerRows.value.filter((r) => !r.is_session_alias)
   if (data.suggested_profiled_speaker_label) {
     selectedProfiledLabel.value = data.suggested_profiled_speaker_label
-  } else if (speakerRows.value.length === 1) {
-    selectedProfiledLabel.value = speakerRows.value[0].label
+  } else if (nonAlias.length === 1) {
+    selectedProfiledLabel.value = nonAlias[0].label
   } else {
     selectedProfiledLabel.value = ''
   }
   selectedMeLabel.value = data.suggested_wx_me_sender_label || '(空 sender)'
+  if (!subjectDisplayName.value.trim() && selectedProfiledLabel.value) {
+    subjectDisplayName.value = selectedProfiledLabel.value
+  }
 }
 
 const jsonFileInputRef = ref(null)
@@ -181,6 +164,8 @@ function isChatJsonSource() {
 }
 
 const PROBE_MESSAGE_LIMIT = 800
+/** 选 wx-cli 会话后 preview-export 单次拉取条数上限（仅用于说话人预统计，与「正式导出条数」无关） */
+const WX_SESSION_PREVIEW_PROBE = 500
 
 async function loadJsonFile(file) {
   if (!file) return
@@ -242,7 +227,6 @@ function clearJsonFile() {
 
 async function submitIngest() {
   ingestError.value = ''
-  personaExportError.value = ''
   ingestResult.value = null
   const isWx = isChatJsonSource()
   const manual = isWx && useManualWxFields.value
@@ -261,20 +245,53 @@ async function submitIngest() {
     ingestError.value = isWx
       ? manual
         ? '请填写「本体化对象」的 subject_id（被建模的 Person 主键）。'
-        : '请在本体化 Person 下拉框中选择一个说话人，或勾选「手动填写」。'
+        : '请在本体 Person 下拉框中选择一个说话人，或勾选「手动填写」。'
       : '请填写「本体化对象」的 subject_id（被建模的 Person 主键）。'
     return
   }
   if (isWx) {
     if (!profiledL) {
       ingestError.value = manual
-        ? '微信导入须填写「被分析对象 sender」，其消息将用于人格画像。'
-        : '请在「被分析对象」中选择一个说话人，或勾选「手动填写」。'
+        ? '请填写「本体 Person」对应的 sender（人格画像来源）。'
+        : '请选择「本体 Person」（其消息用于人格画像，并决定 subject_id）。'
       return
+    }
+    if (!manual) {
+      const nonAlias = speakerRows.value.filter((r) => !r.is_session_alias)
+      if (nonAlias.length >= 2 && profiledL === meL) {
+        ingestError.value = '本体 Person 与 客体 sender 须为不同说话人（私聊双方各选其一）。'
+        return
+      }
     }
     const raw = rawText.value.trim()
     if (!raw && !jsonFile.value) {
-      ingestError.value = '请上传 .json 聊天文件，或在正文粘贴一小段 JSON 做探针后再解析。'
+      const canWxSession =
+        selectedChat.value.trim() &&
+        wxStatus.value?.wx_cli_enabled &&
+        wxStatus.value?.executable_resolves &&
+        !wxImportBlocked.value
+      if (canWxSession) {
+        ingestLoading.value = true
+        try {
+          await runWxSessionIngest()
+        } catch (e) {
+          ingestError.value = e instanceof Error ? e.message : String(e)
+        } finally {
+          ingestLoading.value = false
+        }
+        return
+      }
+      let msg = '请上传 .json 聊天文件，或在正文粘贴一小段 JSON 后再点「导入聊天 JSON」。'
+      if (
+        selectedChat.value.trim() &&
+        wxStatus.value?.wx_cli_enabled &&
+        wxStatus.value?.executable_resolves &&
+        wxImportBlocked.value
+      ) {
+        msg +=
+          ' 你已选择本机 wx-cli 会话：请等待预分析完成并选定「本体 Person / 客体 sender」，或勾选「手动填写」填齐必填项。'
+      }
+      ingestError.value = msg
       return
     }
     if (raw && !raw.startsWith('{') && !raw.startsWith('[')) {
@@ -328,8 +345,7 @@ watch(
       loadWxStatus()
     } else {
       speakerRows.value = []
-      speakerMeta.value = { chat: '', message_count: 0, is_group: false, messages_probed_for_senders: 0 }
-      selectedSubjectLabel.value = ''
+      speakerMeta.value = { chat: '', message_count: 0, is_group: false, messages_probed_for_senders: 0, messages_raw_in_export: null, messages_dropped_no_body: null }
       selectedProfiledLabel.value = ''
       selectedMeLabel.value = '(空 sender)'
       speakerRoleHint.value = ''
@@ -355,12 +371,11 @@ watch(
     const en = wxStatus.value?.wx_cli_enabled
     const ok = wxStatus.value?.executable_resolves
     speakerRows.value = []
-    selectedSubjectLabel.value = ''
     selectedProfiledLabel.value = ''
     selectedMeLabel.value = '(空 sender)'
     speakerRoleHint.value = ''
     previewError.value = ''
-    speakerMeta.value = { chat: '', message_count: 0, is_group: false, messages_probed_for_senders: 0 }
+    speakerMeta.value = { chat: '', message_count: 0, is_group: false, messages_probed_for_senders: 0, messages_raw_in_export: null, messages_dropped_no_body: null }
     if ((st !== 'wechat_export' && st !== 'chat_json') || !chat || !en || !ok) return
     previewSeq += 1
     const scheduledAt = previewSeq
@@ -368,7 +383,7 @@ watch(
   },
 )
 
-watch(selectedSubjectLabel, (lab) => {
+watch(selectedProfiledLabel, (lab) => {
   if ((sourceType.value !== 'wechat_export' && sourceType.value !== 'chat_json') || useManualWxFields.value) return
   if (lab && !subjectDisplayName.value.trim()) {
     subjectDisplayName.value = lab
@@ -386,7 +401,7 @@ async function runPreviewExport(chat, scheduledAt) {
     const data = await apiFetch('/api/v1/wechat/preview-export', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat, probe_limit: 500 }),
+      body: JSON.stringify({ chat, probe_limit: WX_SESSION_PREVIEW_PROBE }),
       signal: ac.signal,
     })
     if (scheduledAt !== previewSeq) return
@@ -411,6 +426,16 @@ async function analyzeJsonSpeakers() {
   if (!raw) {
     if (jsonFile.value) {
       await loadJsonFile(jsonFile.value)
+      return
+    }
+    if (
+      selectedChat.value.trim() &&
+      wxStatus.value?.wx_cli_enabled &&
+      wxStatus.value?.executable_resolves &&
+      speakerRows.value.length
+    ) {
+      previewError.value =
+        '当前说话人已由 wx-cli 会话预分析得到，无需再点此按钮。若要改用粘贴 JSON，请在正文粘贴后再解析。'
       return
     }
     previewError.value = '请粘贴一小段聊天 JSON（含 messages），或先上传 .json 文件完成探针。'
@@ -451,6 +476,12 @@ async function loadWxStatus() {
   }
 }
 
+const wxImportCap = computed(() => {
+  const m = Number(wxStatus.value?.wx_chat_import_max_messages)
+  if (Number.isFinite(m) && m > 0) return Math.min(500_000, Math.floor(m))
+  return 100_000
+})
+
 async function loadSessions() {
   sessionsError.value = ''
   sessionsLoading.value = true
@@ -467,10 +498,8 @@ async function loadSessions() {
   }
 }
 
-async function submitWxImport() {
-  ingestError.value = ''
-  personaExportError.value = ''
-  ingestResult.value = null
+/** 本机 wx-cli 选中会话 → POST /wechat/import-from-session（仅由 submitIngest 在无文件/正文时调用） */
+async function runWxSessionIngest() {
   const manual = useManualWxFields.value
   const sid = manual ? subjectId.value.trim() : resolvedSuggestedSubjectId()
   const profiledL = manual ? profiledSpeakerLabel.value.trim() : resolvedProfiledFromPick()
@@ -478,13 +507,13 @@ async function submitWxImport() {
   if (!sid) {
     ingestError.value = manual
       ? '请填写「本体化对象」的 subject_id。'
-      : '请在本体化 Person 下拉框中选择一个说话人，或勾选「手动填写」。'
+      : '请在本体 Person 下拉框中选择一个说话人，或勾选「手动填写」。'
     return
   }
   if (!profiledL) {
     ingestError.value = manual
-      ? '请填写「被分析对象 sender」。'
-      : '请在「被分析对象」中选择一个说话人，或勾选「手动填写」。'
+      ? '请填写「本体 Person」对应的 sender（人格画像来源）。'
+      : '请选择「本体 Person」（写入 Person 与画像来源 sender）。'
     return
   }
   const chat = (selectedChat.value || '').trim()
@@ -494,28 +523,21 @@ async function submitWxImport() {
   }
   let lim = Number(wxImportLimit.value)
   if (!Number.isFinite(lim) || lim < 1) lim = 500
-  lim = Math.min(8000, Math.floor(lim))
-  wxImportLoading.value = true
-  try {
-    ingestResult.value = await apiFetch('/api/v1/wechat/import-from-session', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        subject_id: sid,
-        subject_display_name: subjectDisplayName.value.trim() || null,
-        profiled_speaker_label: profiledL,
-        wx_me_sender_label: meL,
-        self_speaker_label: profiledL,
-        chat,
-        limit: lim,
-        note: note.value.trim() || null,
-      }),
-    })
-  } catch (e) {
-    ingestError.value = e instanceof Error ? e.message : String(e)
-  } finally {
-    wxImportLoading.value = false
-  }
+  lim = Math.min(wxImportCap.value, Math.floor(lim))
+  ingestResult.value = await apiFetch('/api/v1/wechat/import-from-session', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      subject_id: sid,
+      subject_display_name: subjectDisplayName.value.trim() || null,
+      profiled_speaker_label: profiledL,
+      wx_me_sender_label: meL,
+      self_speaker_label: profiledL,
+      chat,
+      limit: lim,
+      note: note.value.trim() || null,
+    }),
+  })
 }
 
 function clearDraft() {
@@ -530,13 +552,11 @@ function clearDraft() {
   note.value = ''
   ingestResult.value = null
   ingestError.value = ''
-  personaExportError.value = ''
   sessions.value = []
   sessionsError.value = ''
   selectedChat.value = ''
   speakerRows.value = []
-  speakerMeta.value = { chat: '', message_count: 0, is_group: false }
-  selectedSubjectLabel.value = ''
+  speakerMeta.value = { chat: '', message_count: 0, is_group: false, messages_probed_for_senders: 0, messages_raw_in_export: null, messages_dropped_no_body: null }
   selectedProfiledLabel.value = ''
   selectedMeLabel.value = '(空 sender)'
   speakerRoleHint.value = ''
@@ -555,8 +575,8 @@ function clearDraft() {
       </p>
       <ul class="bullets">
         <li>
-          <strong>微信</strong>：选择会话或粘贴 JSON 后会<strong>预解析说话人</strong>；从列表中选择「本体化 Person」与「对话中的我」，系统自动对齐
-          <code>subject_id</code> 与 <code>sender</code>。需要自定义主键时可勾选「手动填写」。
+          <strong>微信</strong>：选择会话或粘贴 JSON 后会<strong>预解析说话人</strong>；选择<strong>本体 Person</strong>与<strong>客体 sender</strong>，系统自动对齐
+          <code>subject_id</code>、<code>profiled_speaker_label</code> 与 <code>wx_me_sender_label</code>。需要自定义主键时可勾选「手动填写」。
         </li>
         <li>
           <strong>其它来源</strong>：仍须手填 <code>subject_id</code> 作为 <code>Person</code> 锚点；聊天中的对方将映射为
@@ -602,7 +622,8 @@ function clearDraft() {
         <h4 class="chat-json-entry__title">导入入口：上传或粘贴聊天 JSON</h4>
         <p class="muted small chat-json-entry__hint">
           选择 <code>.json</code> 或拖拽到下方：仅在服务端读取，用前 {{ PROBE_MESSAGE_LIMIT }} 条消息推断说话人，<strong>不会</strong>把整文件填入正文框。
-          填好下方「本体化」与说话人后，点底部「导入聊天 JSON」上传全文入库。
+          填好下方「本体 Person / 客体 sender」后，点底部「导入聊天 JSON」上传全文入库。
+          若已启用本机 wx-cli、在下方展开区选好会话并完成预分析，也可<strong>不上传文件、不粘贴正文</strong>，直接点底部「导入聊天 JSON」。
         </p>
         <div class="json-upload">
           <input
@@ -641,9 +662,9 @@ function clearDraft() {
       </div>
 
       <details v-if="isChatJson" class="wx-cli-details">
-        <summary class="wx-cli-details__summary">本机 wx-cli 一键导出（可选，需后端开启且本机已装 wx）</summary>
+        <summary class="wx-cli-details__summary">本机 wx-cli（选会话预分析，入库用底部「导入聊天 JSON」）</summary>
         <section class="wx-panel wx-panel--nested">
-        <h4 class="wx-h">本机 wx-cli：选择会话并导入</h4>
+        <h4 class="wx-h">本机 wx-cli：加载会话并预分析</h4>
         <p v-if="wxStatusLoading" class="muted small">正在检测本机 wx-cli 状态…</p>
         <p v-else-if="wxStatusError" class="error small">{{ wxStatusError }}</p>
         <template v-else-if="wxStatus">
@@ -700,25 +721,29 @@ function clearDraft() {
             </div>
             <p v-if="selectedChat && previewLoading" class="muted small">正在预分析该会话的说话人（样本）…</p>
             <label v-if="sessions.length" class="field wx-limit">
-              <span>导出条数（<code>-n</code>，≤8000）</span>
-              <input v-model.number="wxImportLimit" type="number" min="1" max="8000" step="50" />
+              <span>正式导出条数 <code>wx export -n</code>（≤{{ wxImportCap }}，与底部「导入聊天 JSON」一致）</span>
+              <div class="wx-limit-row">
+                <input v-model.number="wxImportLimit" type="number" min="1" :max="wxImportCap" step="50" />
+                <button
+                  v-if="speakerMeta.message_count > 0"
+                  type="button"
+                  class="po-btn po-btn--ghost po-btn--sm"
+                  @click="wxImportLimit = Math.min(wxImportCap, Math.max(1, Math.floor(speakerMeta.message_count)))"
+                >
+                  与当前预分析样本条数对齐
+                </button>
+              </div>
+              <p class="muted small wx-limit-hint">
+                与上方说话人统计里的「共 {{ speakerMeta.message_count }} 条」<strong>不是同一概念</strong>：那里是当前预解析 JSON
+                里的消息数（选会话时后端单次最多向 wx 拉 {{ WX_SESSION_PREVIEW_PROBE }} 条做样本）；此处为<strong>正式入库</strong>时再导出多少条。若希望与当前样本量一致，可点右侧按钮；若要更长对话画像，可增大（不超过会话实际存量与当前上限 {{ wxImportCap }}）。超大会话可在 backend/.env 提高 <code>WX_CHAT_IMPORT_MAX_MESSAGES</code> 并适当增大 <code>WX_CLI_TIMEOUT_SEC</code>。
+              </p>
             </label>
-            <div v-if="sessions.length" class="actions wx-import-actions">
-              <button
-                type="button"
-                class="po-btn po-btn--primary"
-                :disabled="wxImportBlocked"
-                @click="submitWxImport"
-              >
-                {{ wxImportLoading ? '导出并导入中…' : '从 wx-cli 导出并导入' }}
-              </button>
-            </div>
           </template>
         </template>
 
         <hr class="wx-hr" />
         <p class="muted small">
-          亦可在此展开后选会话导出；或继续用下方「JSON 正文」粘贴 <code>wx export … --format json</code> 的完整结果。
+          选会话并填好下方说话人后，点页面底部「导入聊天 JSON」入库；或把 <code>wx export … --format json</code> 的完整结果粘贴到「JSON 正文」再导入。
         </p>
         </section>
       </details>
@@ -731,39 +756,38 @@ function clearDraft() {
 
         <label class="field field--row">
           <input v-model="useManualWxFields" type="checkbox" />
-          <span>手动填写 subject_id 与被分析 sender</span>
+          <span>手动填写 subject_id 与 sender 角色</span>
         </label>
 
         <fieldset v-if="!useManualWxFields && speakerRows.length > 0" class="subject-fieldset subject-fieldset--pick">
-          <legend>本体化与说话人（已由 JSON 预解析）</legend>
+          <legend>本体 Person 与客体 sender（已由 JSON 预解析）</legend>
+          <p v-if="speakerMeta.messages_raw_in_export != null" class="muted small wx-raw-count">
+            本次预解析 JSON：<strong>原始</strong> {{ speakerMeta.messages_raw_in_export }} 条（wx-cli 导出对象里的消息条数）；
+            <strong>规范化后</strong> {{ speakerMeta.message_count }} 条可参与统计（无正文如纯图片/空泡等已丢弃
+            {{ speakerMeta.messages_dropped_no_body ?? 0 }} 条）。
+          </p>
           <p class="muted small">
-            会话「{{ speakerMeta.chat || '?' }}」共 {{ speakerMeta.message_count }} 条有效消息；
-            说话人统计使用前 {{ speakerMeta.messages_probed_for_senders }} 条探针样本。
-            <strong>被分析对象</strong>的消息用于人格画像；<strong>本机微信</strong>为另一方（wx-cli 私聊多为「(空 sender)」）。
+            会话「{{ speakerMeta.chat || '?' }}」在当前<strong>预解析样本</strong>中共
+            {{ speakerMeta.message_count }} 条规范化消息；说话人分布统计使用前 {{ speakerMeta.messages_probed_for_senders }} 条。
+            该数字表示<strong>用于说话人统计的 JSON 片段规模</strong>；若使用本机 wx-cli，展开区内的<strong>正式导出 <code>-n</code></strong>是另一参数，决定点击「导入聊天 JSON」时再向 wx 拉取多少条入库。
+            <strong>本体 Person</strong>：写入 Neo4j 的 Person 锚点（<code>subject_id</code>）与其消息用于人格画像（<code>profiled_speaker_label</code>）；
+            <strong>客体 sender</strong>：对话另一方在 JSON 中的 <code>sender</code>（<code>wx_me_sender_label</code>，私聊常见为「(空 sender)」）。
           </p>
           <p v-if="speakerRoleHint" class="muted small wx-hint">{{ speakerRoleHint }}</p>
           <label class="field">
-            <span>本体化 Person（subject_id 锚点）<em class="req">*</em></span>
-            <select v-model="selectedSubjectLabel" class="select-input">
-              <option disabled value="">请选择</option>
-              <option v-for="r in speakerRows" :key="'sub-' + r.label" :value="r.label">
-                {{ r.is_session_alias ? '会话名：' : '' }}{{ r.label }}（{{ r.count }} 条） — {{ r.suggested_subject_id }}
-              </option>
-            </select>
-          </label>
-          <label class="field">
-            <span>被分析对象（人格画像，须与 sender 一致）<em class="req">*</em></span>
+            <span>本体 Person<em class="req">*</em></span>
             <select v-model="selectedProfiledLabel" class="select-input">
               <option disabled value="">请选择</option>
-              <option v-for="r in speakerRows.filter((x) => !x.is_session_alias)" :key="'prof-' + r.label" :value="r.label">
-                {{ r.label }}（{{ r.count }} 条）
+              <option v-for="r in speakerRowsForPick" :key="'ont-' + r.label" :value="r.label">
+                {{ r.label }}（{{ r.count }} 条） — {{ r.suggested_subject_id }}
               </option>
             </select>
           </label>
           <label class="field">
-            <span>本机微信 sender（通常为 (空 sender)）</span>
+            <span>客体 sender<em class="req">*</em></span>
             <select v-model="selectedMeLabel" class="select-input">
-              <option v-for="r in speakerRows.filter((x) => !x.is_session_alias)" :key="'me-' + r.label" :value="r.label">
+              <option disabled value="">请选择</option>
+              <option v-for="r in speakerRowsForPick" :key="'obj-' + r.label" :value="r.label">
                 {{ r.label }}（{{ r.count }} 条）
               </option>
             </select>
@@ -797,7 +821,7 @@ function clearDraft() {
             />
           </label>
           <label class="field">
-            <span>被分析对象 sender（微信必填）</span>
+            <span>本体 Person（sender，人格画像来源）</span>
             <input
               v-model="profiledSpeakerLabel"
               type="text"
@@ -805,7 +829,7 @@ function clearDraft() {
             />
           </label>
           <label class="field">
-            <span>本机微信 sender</span>
+            <span>客体 sender（对话另一方在 JSON 中的标签）</span>
             <input
               v-model="wxMeSpeakerLabel"
               type="text"
@@ -872,7 +896,12 @@ function clearDraft() {
       </div>
 
       <div class="actions" :class="{ 'actions--sticky-chat': isChatJson }">
-        <button type="button" class="po-btn po-btn--primary" :disabled="ingestLoading" @click="submitIngest">
+        <button
+          type="button"
+          class="po-btn po-btn--primary"
+          :disabled="ingestLoading || (isChatJson && chatJsonPrimaryBlocked)"
+          @click="submitIngest"
+        >
           {{
             ingestLoading
               ? '提交中…'
@@ -889,33 +918,24 @@ function clearDraft() {
       <p v-if="ingestError" class="error">{{ ingestError }}</p>
       <div v-if="ingestResult" class="result">
         <h4>响应 JSON</h4>
-        <div v-if="canExportPersona" class="export-persona">
-          <span class="muted small">导出当前 Neo4j 人格子图（非原始聊天 JSON）：</span>
-          <button
-            type="button"
-            class="po-btn po-btn--ghost po-btn--sm"
-            @click="onDownloadPersonaExport('json')"
-          >
-            下载 JSON
-          </button>
-          <button
-            type="button"
-            class="po-btn po-btn--ghost po-btn--sm"
-            @click="onDownloadPersonaExport('text')"
-          >
-            下载纯文本
-          </button>
-        </div>
-        <p v-if="personaExportError" class="error small">{{ personaExportError }}</p>
         <pre class="po-mono json">{{ JSON.stringify(ingestResult, null, 2) }}</pre>
+        <p v-if="ingestResult.wx_cli" class="muted small wx-ingest-counts">
+          条数说明（与微信客户端「聊天信息」统计未必一致）：wx-cli 导出 JSON 内<strong>原始</strong>
+          {{ ingestResult.wx_cli.messages_raw_in_export ?? '—' }} 条 → <strong>规范化后</strong>
+          {{ ingestResult.wx_cli.messages_normalized_in_export ?? ingestResult.wx_cli.messages_in_file }} 条（去掉无正文
+          {{ ingestResult.wx_cli.messages_dropped_no_body ?? 0 }} 条）；人格摘要管线约使用
+          {{ ingestResult.wx_cli.messages_used_for_digest ?? '—' }} 条。<code>-n</code> 仅为上限，实际条数还受会话存量与
+          wx-cli 行为影响。
+        </p>
       </div>
     </section>
 
     <section v-if="isChatJson" class="po-card aside muted">
       <h3>导入说明</h3>
       <p class="small">
-        入口在表单顶部「上传或粘贴」区域；填好本体化与说话人后，滚动到底部点「导入聊天 JSON」。若出现
-        <code>502</code>，多为后端未启动或代理未连上 <code>127.0.0.1:8000</code>，不影响文件/粘贴导入。
+        入口在表单顶部「上传或粘贴」区域；填好本体 Person 与客体 sender 后，滚动到底部点「导入聊天 JSON」。
+        仅使用 wx-cli 时，选好会话并预分析完成后也可不贴 JSON，直接点底部「导入聊天 JSON」。
+        若出现 <code>502</code>，多为后端未启动或代理未连上 <code>127.0.0.1:8000</code>，不影响文件/粘贴导入。
       </p>
     </section>
 
@@ -1263,14 +1283,6 @@ textarea {
   color: #475569;
 }
 
-.export-persona {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.5rem;
-  margin: 0 0 0.5rem;
-}
-
 .json {
   margin: 0;
   padding: 0.85rem;
@@ -1381,11 +1393,24 @@ textarea {
 
 .wx-limit {
   margin-top: 0.75rem;
-  max-width: 12rem;
+  max-width: 100%;
 }
 
-.wx-import-actions {
-  margin-top: 0.5rem;
+.wx-limit-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.35rem;
+}
+
+.wx-limit-row input[type='number'] {
+  max-width: 8rem;
+}
+
+.wx-limit-hint {
+  margin: 0.45rem 0 0;
+  line-height: 1.45;
 }
 
 .wx-hr {

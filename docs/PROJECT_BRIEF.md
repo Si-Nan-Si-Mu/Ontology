@@ -9,10 +9,14 @@
 
 | 文档                                                                     | 用途                                           |
 | ---------------------------------------------------------------------- | -------------------------------------------- |
+| [README.md](../README.md)                                             | 仓库总览与快速入口                                    |
+| [OPERATIONS.md](OPERATIONS.md)                                          | 前后端启动、Neo4j、清空库                               |
+| [BRAND_AND_TRADEMARK.md](BRAND_AND_TRADEMARK.md)                        | 商业 IP、品牌命名、商标与 VI、图形标                        |
+| [PRESENTATION_SHOWCASE.md](PRESENTATION_SHOWCASE.md)                     | **展演文档**：项目内容、目的、演示脚本、未来方向、伦理与 Q&A                |
 | [PITCH_ONE_PAGER.md](PITCH_ONE_PAGER.md)                               | 答辩一页纸（约 1 分钟口播结构）                            |
 | [TECH_SPEC.md](TECH_SPEC.md)                                           | API、幂等、Neo4j 约束、验收清单                         |
 | [WECHAT_WX_CLI.md](WECHAT_WX_CLI.md)                                   | 本机 wx-cli 导出 JSON → `POST /api/v1/ingest` 流程 |
-| [../ontology/backend/ONTOLOGY.yaml](../ontology/backend/ONTOLOGY.yaml) | TBox 字段级定义与 Neo4j 映射（语义真源）                   |
+| [../backend/ONTOLOGY.yaml](../backend/ONTOLOGY.yaml)                     | TBox 字段级定义与 Neo4j 映射（语义真源）                   |
 
 
 ---
@@ -117,6 +121,16 @@
 ```
 
 **关键中间件**：任务队列（Celery / RQ）、对象存储（原始文件）、向量库（可选，用于语义检索与对齐）。
+
+### 6.1 POG 应用分层（产品语义，与实现路线图对齐）
+
+| 层级 | 名称（工作称呼） | 核心含义 |
+| --- | --- | --- |
+| **第一层** | **图约束推理（Graph-grounded LLM）** | 以 Neo4j 中 **`Person` + 已入库特质子图 + 结构化经历/发言证据**（与 `ONTOLOGY.yaml` 一致）作为 DeepSeek 的**唯一事实底层**；模型只做压缩、解释、对比与不确定性表达，**不编造**图中不存在的个人属性或经历。技术落点见 [`TECH_SPEC.md`](TECH_SPEC.md) **§5.9** 与 **`POST /narrate`（P1）**。 |
+| **第二层** | 多档案 / 多情境推演 | 跨 `Person`、跨会话或反事实边编辑的仿真与叙事（仍以图变更与证据链可审计为前提）。 |
+| **第三层** | 混合检索与量表对齐 | 向量检索、外部量表、多模态证据与图谱的联合置信度（远期）。 |
+
+**第一层**即你所说的「POG 的第一种可交付应用形态」：用户问的是「这个人格档案里有什么、意味着什么」，系统**严格按库答**，DeepSeek 是表达与推理助手，不是另一份隐式档案。
 
 ---
 
