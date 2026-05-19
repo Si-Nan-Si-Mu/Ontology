@@ -106,6 +106,97 @@ def delete_old_persona_batch(tx: Any, batch_id: str) -> None:
     )
 
 
+def _merge_person_node(tx: Any, *, person_key: str, display_name: str) -> None:
+    """``person_key`` 为 wx-cli 根 ``username``（wxid）或本机 ``WX_LOCAL_USERNAME``。"""
+    uname = (person_key or "").strip()[:128]
+    dn = (display_name or "").strip()[:256] or uname
+    tx.run(
+        """
+        OPTIONAL MATCH (legacy:Person {subject_id: $uname})
+        WHERE legacy.username IS NULL
+        SET legacy.username = $uname
+        WITH 1 AS _
+        MERGE (p:Person {username: $uname})
+        ON CREATE SET p.created_at = datetime(), p.subject_id = $uname
+        SET p.updated_at = datetime(),
+            p.username = $uname,
+            p.subject_id = $uname,
+            p.display_name = CASE
+              WHEN $dn <> '' THEN $dn
+              ELSE coalesce(p.display_name, $uname)
+            END
+        """,
+        uname=uname,
+        dn=dn,
+    )
+
+
+def merge_person_shell(
+    tx: Any,
+    *,
+    subject_id: str,
+    display_name: str,
+) -> None:
+    """仅确保 Person 节点存在并更新展示名（不触碰 last_persona_batch_id，除非后续写入子图）。"""
+    _merge_person_node(tx, person_key=subject_id, display_name=display_name)
+
+
+def write_conversation_peer_links(
+    tx: Any,
+    *,
+    subject_id_a: str,
+    subject_id_b: str,
+    batch_id: str,
+    chat_session: str,
+    sender_a_display: str,
+    sender_b_display: str,
+    relationship: dict[str, Any] | None = None,
+) -> None:
+    """在两人 Person 间建立双向 CONVERSATION_WITH（同一对多次导入会 MERGE 更新边上元数据）。"""
+    if not subject_id_a or not subject_id_b or subject_id_a == subject_id_b:
+        return
+    chat = (chat_session or "")[:256]
+    sa = (sender_a_display or "")[:128]
+    sb = (sender_b_display or "")[:128]
+    rel = relationship if isinstance(relationship, dict) else {}
+    rel_type = str(rel.get("type") or "unknown")[:48]
+    rel_zh = str(rel.get("type_zh") or "不确定")[:32]
+    rel_conf = float(rel.get("confidence", 0.0) or 0.0)
+    rel_rationale = str(rel.get("rationale") or "")[:512]
+    rel_src = str(rel.get("inference_source") or "heuristic")[:32]
+    for src_sid, tgt_sid, peer_lab in (
+        (subject_id_a, subject_id_b, sb),
+        (subject_id_b, subject_id_a, sa),
+    ):
+        tx.run(
+            """
+            MATCH (a:Person) WHERE a.username = $sa OR a.subject_id = $sa
+            MATCH (b:Person) WHERE b.username = $sb OR b.subject_id = $sb
+            MERGE (a)-[r:CONVERSATION_WITH]->(b)
+            SET r.updated_at = datetime(),
+                r.persona_batch_id = $batch_id,
+                r.chat_session = $chat,
+                r.peer_sender_label = $peer_lab,
+                r.counterpart_subject_id = $sb,
+                r.relationship_type = $rel_type,
+                r.relationship_type_zh = $rel_zh,
+                r.relationship_confidence = $rel_conf,
+                r.relationship_rationale = $rel_rationale,
+                r.relationship_inference_source = $rel_src
+            """,
+            sa=src_sid,
+            sb=tgt_sid,
+            batch_id=batch_id,
+            chat=chat,
+            peer_lab=peer_lab,
+            rel_type=rel_type,
+            rel_zh=rel_zh,
+            rel_conf=rel_conf,
+            rel_rationale=rel_rationale,
+            rel_src=rel_src,
+        )
+
+
 def write_persona_facet_graph(
     tx: Any,
     *,
@@ -131,9 +222,15 @@ def write_persona_facet_graph(
 
     tx.run(
         """
-        MERGE (p:Person {subject_id: $subject_id})
-        ON CREATE SET p.created_at = datetime()
+        OPTIONAL MATCH (legacy:Person {subject_id: $subject_id})
+        WHERE legacy.username IS NULL
+        SET legacy.username = $subject_id
+        WITH 1 AS _
+        MERGE (p:Person {username: $subject_id})
+        ON CREATE SET p.created_at = datetime(), p.subject_id = $subject_id
         SET p.updated_at = datetime(),
+            p.username = $subject_id,
+            p.subject_id = $subject_id,
             p.display_name = CASE
               WHEN $display_name <> '' THEN $display_name
               ELSE coalesce(p.display_name, $fallback_display)
@@ -168,7 +265,7 @@ def write_persona_facet_graph(
     base = _facet_base(batch_id, ctx, inference_source=src_default)
     tx.run(
         """
-        MATCH (p:Person {subject_id: $subject_id})
+        MATCH (p:Person) WHERE p.username = $subject_id OR p.subject_id = $subject_id
         CREATE (s:PersonaSummary {
           facet_id: $facet_id,
           persona_batch_id: $batch_id,
@@ -191,7 +288,7 @@ def write_persona_facet_graph(
     base = _facet_base(batch_id, ctx, inference_source=src_default)
     tx.run(
         """
-        MATCH (p:Person {subject_id: $subject_id})
+        MATCH (p:Person) WHERE p.username = $subject_id OR p.subject_id = $subject_id
         CREATE (e:ExpressionStyleTrait {
           facet_id: $facet_id,
           persona_batch_id: $batch_id,
@@ -216,7 +313,7 @@ def write_persona_facet_graph(
         )
         tx.run(
             """
-            MATCH (p:Person {subject_id: $subject_id})
+            MATCH (p:Person) WHERE p.username = $subject_id OR p.subject_id = $subject_id
             CREATE (t:VerbalTicObservation {
               facet_id: $facet_id,
               persona_batch_id: $batch_id,
@@ -248,7 +345,7 @@ def write_persona_facet_graph(
         base = _facet_base(batch_id, ctx, inference_source=isrc, extractor=ext)
         tx.run(
             """
-            MATCH (p:Person {subject_id: $subject_id})
+            MATCH (p:Person) WHERE p.username = $subject_id OR p.subject_id = $subject_id
             CREATE (emo:EmotionDimensionObservation {
               facet_id: $facet_id,
               persona_batch_id: $batch_id,
@@ -281,7 +378,7 @@ def write_persona_facet_graph(
         base = _facet_base(batch_id, ctx, inference_source="deepseek", extractor=ctx["extractor_version"])
         tx.run(
             """
-            MATCH (p:Person {subject_id: $subject_id})
+            MATCH (p:Person) WHERE p.username = $subject_id OR p.subject_id = $subject_id
             CREATE (st:SalientTraitObservation {
               facet_id: $facet_id,
               persona_batch_id: $batch_id,
@@ -320,7 +417,7 @@ def write_persona_facet_graph(
         base = _facet_base(batch_id, ctx, inference_source="hybrid")
         tx.run(
             """
-            MATCH (p:Person {subject_id: $subject_id})
+            MATCH (p:Person) WHERE p.username = $subject_id OR p.subject_id = $subject_id
             CREATE (sr:SocialRelationSketchFacet {
               facet_id: $facet_id,
               persona_batch_id: $batch_id,
@@ -337,6 +434,10 @@ def write_persona_facet_graph(
               self_turn_ratio: $stratio,
               interpretation: $interp,
               interpretation_source: $interp_src,
+              dyadic_relation_type: $drel_type,
+              dyadic_relation_type_zh: $drel_zh,
+              dyadic_relation_confidence: $drel_conf,
+              dyadic_relation_rationale: $drel_rat,
               created_at: datetime()
             })
             CREATE (p)-[:HAS_SOCIAL_RELATION_SKETCH]->(sr)
@@ -351,6 +452,10 @@ def write_persona_facet_graph(
             stratio=float(sk.get("self_turn_ratio", 0.0) or 0.0),
             interp=str(sk.get("interpretation", ""))[:512],
             interp_src=interp_src[:32],
+            drel_type=str(sk.get("dyadic_relation_type") or "")[:48] or None,
+            drel_zh=str(sk.get("dyadic_relation_type_zh") or "")[:32] or None,
+            drel_conf=float(sk.get("dyadic_relation_confidence", 0.0) or 0.0),
+            drel_rat=str(sk.get("dyadic_relation_rationale") or "")[:512] or None,
             **base,
         )
         created += 1
@@ -364,7 +469,7 @@ def write_persona_facet_graph(
         base = _facet_base(batch_id, ctx, inference_source=isrc, extractor=ext)
         tx.run(
             """
-            MATCH (p:Person {subject_id: $subject_id})
+            MATCH (p:Person) WHERE p.username = $subject_id OR p.subject_id = $subject_id
             CREATE (en:EnneagramHypothesisFacet {
               facet_id: $facet_id,
               persona_batch_id: $batch_id,
@@ -405,7 +510,7 @@ def write_persona_facet_graph(
             trait_name = str(trait_row.get("trait", "")).replace("_proxy", "")[:64]
             tx.run(
                 """
-                MATCH (p:Person {subject_id: $subject_id})
+                MATCH (p:Person) WHERE p.username = $subject_id OR p.subject_id = $subject_id
                 CREATE (bf:BigFiveTraitFacet {
                   facet_id: $facet_id,
                   persona_batch_id: $batch_id,
@@ -439,7 +544,7 @@ def write_persona_facet_graph(
     base = _facet_base(batch_id, ctx, inference_source=mbti_isrc, extractor=ext)
     tx.run(
         """
-        MATCH (p:Person {subject_id: $subject_id})
+        MATCH (p:Person) WHERE p.username = $subject_id OR p.subject_id = $subject_id
         CREATE (m:MbtiHypothesisFacet {
           facet_id: $facet_id,
           persona_batch_id: $batch_id,
@@ -472,7 +577,7 @@ def write_persona_facet_graph(
     base = _facet_base(batch_id, ctx, inference_source=src_default)
     tx.run(
         """
-        MATCH (p:Person {subject_id: $subject_id})
+        MATCH (p:Person) WHERE p.username = $subject_id OR p.subject_id = $subject_id
         CREATE (meta:PersonaAnalysisMeta {
           facet_id: $facet_id,
           persona_batch_id: $batch_id,
@@ -505,7 +610,7 @@ def write_persona_facet_graph(
         )
         tx.run(
             """
-            MATCH (p:Person {subject_id: $subject_id})
+            MATCH (p:Person) WHERE p.username = $subject_id OR p.subject_id = $subject_id
             CREATE (d:DialogueExemplar {
               facet_id: $facet_id,
               persona_batch_id: $batch_id,

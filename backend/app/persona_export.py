@@ -1,4 +1,8 @@
-"""从 Neo4j 导出 Person 当前批次人格分析结果（JSON / 纯文本）。"""
+"""从 Neo4j 导出 Person 人格分析结果（JSON / 纯文本）。
+
+各 facet 默认聚合**所有导入批次**（按 ``created_at`` 新到旧）；``persona_batch_id`` 字段仍为
+``Person.last_persona_batch_id``（最近一次写入指针）。
+"""
 
 from __future__ import annotations
 
@@ -21,17 +25,31 @@ def _collect(
     order_key: str | None = None,
     order_desc: bool = False,
 ) -> list[dict[str, Any]]:
-    if not batch_id:
-        return []
-    direction = "DESC" if order_desc else "ASC"
-    order_clause = f"n.{order_key} {direction}" if order_key else "elementId(n)"
-    q = f"""
-    MATCH (:Person {{subject_id: $sid}})-[:{rel}]->(n:{label})
-    WHERE n.persona_batch_id = $bid
-    RETURN properties(n) AS props
-    ORDER BY {order_clause}
-    """
-    rows = neo4j.execute_read(q, {"sid": subject_id, "bid": batch_id})
+    """``batch_id`` 非空时仅取该批；为空时取该 Person 下该类型的全部 facet（多批次追加）。"""
+    if batch_id:
+        direction = "DESC" if order_desc else "ASC"
+        order_clause = f"n.{order_key} {direction}" if order_key else "elementId(n)"
+        q = f"""
+        MATCH (anchor:Person) WHERE anchor.username = $sid OR anchor.subject_id = $sid
+        MATCH (anchor)-[:{rel}]->(n:{label})
+        WHERE n.persona_batch_id = $bid
+        RETURN properties(n) AS props
+        ORDER BY {order_clause}
+        """
+        rows = neo4j.execute_read(q, {"sid": subject_id, "bid": batch_id})
+    else:
+        if order_key:
+            sec = "DESC" if order_desc else "ASC"
+            order_clause = f"n.created_at DESC, n.{order_key} {sec}"
+        else:
+            order_clause = "n.created_at DESC, elementId(n) DESC"
+        q = f"""
+        MATCH (anchor:Person) WHERE anchor.username = $sid OR anchor.subject_id = $sid
+        MATCH (anchor)-[:{rel}]->(n:{label})
+        RETURN properties(n) AS props
+        ORDER BY {order_clause}
+        """
+        rows = neo4j.execute_read(q, {"sid": subject_id})
     return [json_safe(r["props"]) for r in rows if r.get("props")]
 
 
@@ -50,8 +68,9 @@ def _one(
 def build_persona_export_bundle(neo4j: Neo4jConnection, subject_id: str) -> dict[str, Any]:
     rows = neo4j.execute_read(
         """
-        MATCH (p:Person {subject_id: $sid})
+        MATCH (p:Person) WHERE p.username = $sid OR p.subject_id = $sid
         RETURN properties(p) AS person, p.last_persona_batch_id AS batch_id
+        LIMIT 1
         """,
         {"sid": subject_id},
     )
@@ -63,43 +82,46 @@ def build_persona_export_bundle(neo4j: Neo4jConnection, subject_id: str) -> dict
     if batch_id is not None and hasattr(batch_id, "__str__") and not isinstance(batch_id, str):
         batch_id = str(batch_id)
 
+    # 导出聚合全部批次 facet；单条字段取「最新 created_at」对应节点
+    facet_batch: str | None = None
+
     bundle: dict[str, Any] = {
         "export_schema": "pog_persona_export_v1",
         "subject_id": subject_id,
         "persona_batch_id": batch_id,
         "person": person,
-        "persona_summary": _one(neo4j, subject_id=subject_id, batch_id=batch_id, rel="HAS_PERSONA_SUMMARY", label="PersonaSummary"),
+        "persona_summary": _one(neo4j, subject_id=subject_id, batch_id=facet_batch, rel="HAS_PERSONA_SUMMARY", label="PersonaSummary"),
         "expression_style": _one(
-            neo4j, subject_id=subject_id, batch_id=batch_id, rel="HAS_EXPRESSION_STYLE", label="ExpressionStyleTrait"
+            neo4j, subject_id=subject_id, batch_id=facet_batch, rel="HAS_EXPRESSION_STYLE", label="ExpressionStyleTrait"
         ),
-        "verbal_tics": _collect(neo4j, subject_id=subject_id, batch_id=batch_id, rel="HAS_VERBAL_TIC", label="VerbalTicObservation"),
+        "verbal_tics": _collect(neo4j, subject_id=subject_id, batch_id=facet_batch, rel="HAS_VERBAL_TIC", label="VerbalTicObservation"),
         "emotion_dimensions": _collect(
-            neo4j, subject_id=subject_id, batch_id=batch_id, rel="HAS_EMOTION_DIMENSION", label="EmotionDimensionObservation"
+            neo4j, subject_id=subject_id, batch_id=facet_batch, rel="HAS_EMOTION_DIMENSION", label="EmotionDimensionObservation"
         ),
         "social_relation_sketch": _one(
             neo4j,
             subject_id=subject_id,
-            batch_id=batch_id,
+            batch_id=facet_batch,
             rel="HAS_SOCIAL_RELATION_SKETCH",
             label="SocialRelationSketchFacet",
         ),
         "enneagram_hypothesis": _one(
-            neo4j, subject_id=subject_id, batch_id=batch_id, rel="HAS_ENNEAGRAM_HYPOTHESIS", label="EnneagramHypothesisFacet"
+            neo4j, subject_id=subject_id, batch_id=facet_batch, rel="HAS_ENNEAGRAM_HYPOTHESIS", label="EnneagramHypothesisFacet"
         ),
         "big_five_traits": _collect(
-            neo4j, subject_id=subject_id, batch_id=batch_id, rel="HAS_BIG_FIVE_TRAIT", label="BigFiveTraitFacet"
+            neo4j, subject_id=subject_id, batch_id=facet_batch, rel="HAS_BIG_FIVE_TRAIT", label="BigFiveTraitFacet"
         ),
         "big_five_sketch_legacy": _one(
-            neo4j, subject_id=subject_id, batch_id=batch_id, rel="HAS_BIG_FIVE_SKETCH", label="BigFiveSketchFacet"
+            neo4j, subject_id=subject_id, batch_id=facet_batch, rel="HAS_BIG_FIVE_SKETCH", label="BigFiveSketchFacet"
         ),
-        "mbti_hypothesis": _one(neo4j, subject_id=subject_id, batch_id=batch_id, rel="HAS_MBTI_HYPOTHESIS", label="MbtiHypothesisFacet"),
+        "mbti_hypothesis": _one(neo4j, subject_id=subject_id, batch_id=facet_batch, rel="HAS_MBTI_HYPOTHESIS", label="MbtiHypothesisFacet"),
         "analysis_meta": _one(
-            neo4j, subject_id=subject_id, batch_id=batch_id, rel="HAS_PERSONA_ANALYSIS_META", label="PersonaAnalysisMeta"
+            neo4j, subject_id=subject_id, batch_id=facet_batch, rel="HAS_PERSONA_ANALYSIS_META", label="PersonaAnalysisMeta"
         ),
         "dialogue_exemplars": _collect(
             neo4j,
             subject_id=subject_id,
-            batch_id=batch_id,
+            batch_id=facet_batch,
             rel="HAS_DIALOGUE_EXEMPLAR",
             label="DialogueExemplar",
             order_key="order_index",
@@ -107,13 +129,33 @@ def build_persona_export_bundle(neo4j: Neo4jConnection, subject_id: str) -> dict
         "salient_traits": _collect(
             neo4j,
             subject_id=subject_id,
-            batch_id=batch_id,
+            batch_id=facet_batch,
             rel="HAS_SALIENT_TRAIT",
             label="SalientTraitObservation",
             order_key="salience_0_1",
             order_desc=True,
         ),
     }
+
+    sk = bundle.get("social_relation_sketch")
+    if isinstance(sk, dict) and sk.get("dyadic_relation_type_zh"):
+        bundle["dyadic_relationship"] = {
+            "type": sk.get("dyadic_relation_type"),
+            "type_zh": sk.get("dyadic_relation_type_zh"),
+            "confidence": sk.get("dyadic_relation_confidence"),
+            "rationale": sk.get("dyadic_relation_rationale"),
+        }
+    else:
+        meta_parsed = None
+        meta_node = bundle.get("analysis_meta") or {}
+        raw_json = meta_node.get("payload_json") if isinstance(meta_node, dict) else None
+        if isinstance(raw_json, str) and raw_json.strip():
+            try:
+                meta_parsed = json.loads(raw_json)
+            except json.JSONDecodeError:
+                meta_parsed = None
+        if isinstance(meta_parsed, dict) and isinstance(meta_parsed.get("dyadic_relationship"), dict):
+            bundle["dyadic_relationship"] = meta_parsed["dyadic_relationship"]
 
     meta_node = bundle.get("analysis_meta") or {}
     raw_json = meta_node.get("payload_json") if isinstance(meta_node, dict) else None
@@ -173,6 +215,20 @@ def format_persona_export_text(bundle: dict[str, Any]) -> str:
         lines.append("[社会关系草图]")
         lines.append(f"  channel: {sk.get('channel')}")
         lines.append(f"  interpretation: {sk.get('interpretation')}")
+        if sk.get("dyadic_relation_type_zh"):
+            lines.append(
+                f"  双人关系（探索性）: {sk.get('dyadic_relation_type_zh')} "
+                f"(conf={sk.get('dyadic_relation_confidence')})"
+            )
+            if sk.get("dyadic_relation_rationale"):
+                lines.append(f"  依据: {sk.get('dyadic_relation_rationale')}")
+        lines.append("")
+    dr = bundle.get("dyadic_relationship")
+    if isinstance(dr, dict) and dr.get("type_zh") and not isinstance(sk, dict):
+        lines.append("[双人关系假设]")
+        lines.append(f"  {dr.get('type_zh')} (conf={dr.get('confidence')})")
+        if dr.get("rationale"):
+            lines.append(f"  {dr.get('rationale')}")
         lines.append("")
 
     en = bundle.get("enneagram_hypothesis")

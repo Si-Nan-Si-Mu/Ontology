@@ -1,14 +1,17 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { RouterLink, useRoute, useRouter } from 'vue-router'
 
 import { apiFetch, apiUrl } from '@/api/http.js'
+import PoLoading from '@/components/PoLoading.vue'
+import PoLoadingOverlay from '@/components/PoLoadingOverlay.vue'
 
 const route = useRoute()
 const router = useRouter()
 
 /** 主标签 -> 节点配色（与 Neo4j facet 标签对齐） */
 const LABEL_COLORS = {
+  Person: '#b45309',
   PersonaSummary: '#2563eb',
   ExpressionStyleTrait: '#0891b2',
   VerbalTicObservation: '#ca8a04',
@@ -254,8 +257,28 @@ function colorForLabels(labels) {
   return LABEL_COLORS.default
 }
 
+function isPeerPersonNode(edge) {
+  return (edge.target_labels || []).includes('Person')
+}
+
+function edgeRelationshipLabel(edge) {
+  if (edge.relationship === 'CONVERSATION_WITH') {
+    const rp = edge.relationship_properties || {}
+    const zh = rp.relationship_type_zh || rp.relationship_type
+    if (zh) return String(zh).slice(0, 12)
+    return '会话'
+  }
+  return edge.relationship.replace('HAS_', '').slice(0, 18)
+}
+
 function facetCaption(edge) {
   const p = edge.target_properties || {}
+  const lbs = edge.target_labels || []
+  if (lbs.includes('Person')) {
+    const sid = p.subject_id != null ? String(p.subject_id) : ''
+    const dn = p.display_name != null ? String(p.display_name) : ''
+    return (dn || sid || 'Person').slice(0, 42)
+  }
   const keys = [
     'label',
     'pattern_label',
@@ -269,7 +292,6 @@ function facetCaption(edge) {
     const v = p[k]
     if (typeof v === 'string' && v.trim()) return v.trim().slice(0, 42)
   }
-  const lbs = edge.target_labels || []
   return lbs[0] || '节点'
 }
 
@@ -396,6 +418,7 @@ watch([graphPage, graphPageSize], () => {
 <template>
   <div class="po-page graph">
     <section class="toolbar-card po-card">
+      <PoLoadingOverlay :show="personsLoading" label="正在加载 Person 列表…" />
       <div class="toolbar-head">
         <div>
           <h2>本体化图数据</h2>
@@ -414,7 +437,7 @@ watch([graphPage, graphPageSize], () => {
             >
               <option v-if="!persons.length" disabled value="">（暂无 Person 节点）</option>
               <option v-for="p in persons" :key="p.subject_id" :value="p.subject_id">
-                {{ p.display_name ? `${p.display_name} · ` : '' }}{{ p.subject_id }}
+                {{ p.display_name ? `${p.display_name} · ` : '' }}{{ p.username || p.subject_id }}
               </option>
             </select>
           </label>
@@ -424,7 +447,8 @@ watch([graphPage, graphPageSize], () => {
             :disabled="personsLoading || subgraphLoading || !selectedSubjectId"
             @click="loadSubgraph"
           >
-            {{ subgraphLoading ? '加载中…' : '刷新子图' }}
+            <PoLoading v-if="subgraphLoading" label="加载中…" size="sm" />
+            <template v-else>刷新子图</template>
           </button>
         </div>
       </div>
@@ -466,6 +490,13 @@ watch([graphPage, graphPageSize], () => {
             <span v-if="subgraph?.stats" class="muted small">
               外向 facet 节点：{{ subgraph.stats.facet_node_count }} 个
             </span>
+            <RouterLink
+              v-if="selectedSubjectId"
+              class="po-btn po-btn--ghost po-btn--sm simulate-link"
+              :to="{ path: '/simulate', query: { subject_id: selectedSubjectId } }"
+            >
+              第一人称模拟
+            </RouterLink>
             <div class="viz-controls">
               <span class="muted small viz-zoom-label">{{ Math.round(zoomScale * 100) }}%</span>
               <button type="button" class="po-btn po-btn--ghost po-btn--sm" @click="zoomOut">缩小</button>
@@ -478,7 +509,8 @@ watch([graphPage, graphPageSize], () => {
           <p class="muted small viz-hint">
             滚轮缩放；在空白处按住拖拽平移画布；可拖动 Person 与各 facet 节点微调布局（仅当前会话，不写入图库）。
           </p>
-          <div class="svg-scroll">
+          <PoLoadingOverlay :show="subgraphLoading" label="正在加载子图…" />
+          <div v-if="!subgraphLoading" class="svg-scroll">
             <svg
               class="graph-svg"
               viewBox="0 0 900 520"
@@ -520,8 +552,8 @@ watch([graphPage, graphPageSize], () => {
                     :y1="paintLayout.cy"
                     :x2="node.x"
                     :y2="node.y"
-                    stroke="#cbd5e1"
-                    stroke-width="2"
+                    :stroke="node.relationship === 'CONVERSATION_WITH' ? '#059669' : '#cbd5e1'"
+                    :stroke-width="node.relationship === 'CONVERSATION_WITH' ? 2.5 : 2"
                     marker-end="url(#arrowHead)"
                   />
                   <text
@@ -530,9 +562,10 @@ watch([graphPage, graphPageSize], () => {
                     :x="node.midX"
                     :y="node.midY"
                     class="rel-label"
+                    :class="{ 'rel-label--social': node.relationship === 'CONVERSATION_WITH' }"
                     text-anchor="middle"
                   >
-                    {{ node.relationship.replace('HAS_', '').slice(0, 18) }}
+                    {{ edgeRelationshipLabel(node) }}
                   </text>
 
                   <g class="graph-node-person" @pointerdown="onPersonPointerDown">
@@ -548,7 +581,14 @@ watch([graphPage, graphPageSize], () => {
                       Person
                     </text>
                     <text :x="paintLayout.cx" :y="paintLayout.cy + 14" class="node-sub" text-anchor="middle">
-                      {{ (paintLayout.person?.properties?.subject_id || selectedSubjectId || '—').slice(0, 22) }}
+                      {{
+                        (
+                          paintLayout.person?.properties?.username ||
+                          paintLayout.person?.properties?.subject_id ||
+                          selectedSubjectId ||
+                          '—'
+                        ).slice(0, 22)
+                      }}
                     </text>
                   </g>
 
@@ -561,10 +601,10 @@ watch([graphPage, graphPageSize], () => {
                     <circle
                       :cx="node.x"
                       :cy="node.y"
-                      r="36"
+                      :r="isPeerPersonNode(node) ? 40 : 36"
                       :fill="colorForLabels(node.target_labels)"
-                      stroke="#fff"
-                      stroke-width="2"
+                      :stroke="isPeerPersonNode(node) ? '#0d9488' : '#fff'"
+                      :stroke-width="isPeerPersonNode(node) ? 3 : 2"
                     />
                     <text :x="node.x" :y="node.y - 4" class="facet-cap" text-anchor="middle">
                       {{ (node.target_labels && node.target_labels[0]) || 'Node' }}
@@ -614,7 +654,10 @@ watch([graphPage, graphPageSize], () => {
               </select>
               条
             </label>
-            <button type="button" class="po-btn" :disabled="graphLoading" @click="loadGraphBrowse">刷新</button>
+            <button type="button" class="po-btn po-btn--with-spinner" :disabled="graphLoading" @click="loadGraphBrowse">
+              <PoLoading v-if="graphLoading" label="刷新中…" size="sm" />
+              <template v-else>刷新</template>
+            </button>
           </div>
         </div>
         <p v-if="graphError" class="error">{{ graphError }}</p>
@@ -638,7 +681,7 @@ watch([graphPage, graphPageSize], () => {
             </tbody>
           </table>
           <p v-else-if="!graphLoading" class="empty muted">暂无节点</p>
-          <p v-if="graphLoading" class="loading muted">加载中…</p>
+          <PoLoading v-if="graphLoading" label="加载中…" />
         </div>
         <div class="pager">
           <button type="button" class="po-btn" :disabled="graphPage <= 1 || graphLoading" @click="prevPage">
@@ -842,6 +885,11 @@ watch([graphPage, graphPageSize], () => {
   font-size: 10px;
   fill: #64748b;
   pointer-events: none;
+}
+
+.rel-label--social {
+  fill: #047857;
+  font-weight: 700;
 }
 
 .node-cap {

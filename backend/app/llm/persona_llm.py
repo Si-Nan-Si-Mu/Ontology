@@ -19,6 +19,42 @@ logger = logging.getLogger(__name__)
 
 _MBTI_TYPE_RE = re.compile(r"^[IE][NS][FT][JP]$", re.IGNORECASE)
 
+# 双人关系类型（canonical key → 中文展示）；LLM 须从中选一或 unknown
+RELATIONSHIP_TYPE_ZH: dict[str, str] = {
+    "friend": "朋友",
+    "romantic_partner": "恋人",
+    "ambiguous_romance": "暧昧对象",
+    "sibling": "兄弟姐妹",
+    "family": "家人/亲属",
+    "colleague": "同事",
+    "classmate": "同学",
+    "mentor_mentee": "师长/学员",
+    "business": "商务往来",
+    "acquaintance": "相识",
+    "estranged": "关系疏远",
+    "unknown": "不确定",
+}
+
+_RELATIONSHIP_ALIASES: dict[str, str] = {
+    "恋人": "romantic_partner",
+    "情侣": "romantic_partner",
+    "男朋友": "romantic_partner",
+    "女朋友": "romantic_partner",
+    "暧昧": "ambiguous_romance",
+    "暧昧对象": "ambiguous_romance",
+    "朋友": "friend",
+    "好友": "friend",
+    "兄弟": "sibling",
+    "姐妹": "sibling",
+    "兄妹": "sibling",
+    "姐弟": "sibling",
+    "家人": "family",
+    "亲戚": "family",
+    "同事": "colleague",
+    "同学": "classmate",
+    "师生": "mentor_mentee",
+}
+
 _SALIENT_CATEGORIES = frozenset(
     {
         "interpersonal_style",
@@ -55,6 +91,7 @@ _SYSTEM_PROMPT = """你是人格心理学方向的**文本证据评审员**。
 
 _USER_TEMPLATE = """会话：{chat}（{channel}）
 被分析主体 sender 标签：{self_label}
+对话另一方 sender 标签：{counterparty_label}
 有效消息约 {n_used} 条；自己侧发言样本（可能截断）：
 ---
 {self_sample}
@@ -114,12 +151,20 @@ _USER_TEMPLATE = """会话：{chat}（{channel}）
     {{"dimension": "snake_case", "score_0_1": 0.0, "note": "非临床简短说明"}}
   ],
   "social_relation_interpretation": "在结构线索之上的互动风格（非亲密度打分）",
+  "dyadic_relationship": {{
+    "type": "从下列 canonical 键选一：friend|romantic_partner|ambiguous_romance|sibling|family|colleague|classmate|mentor_mentee|business|acquaintance|estranged|unknown",
+    "type_zh": "与 type 对应的中文短标签，如「朋友」「恋人」「暧昧对象」「兄弟姐妹」",
+    "confidence": 0.0,
+    "rationale": "40~120字：依据称呼、语气、话题边界、承诺/排他性线索等；须写「探索性假设」",
+    "alternative_type": "可选：第二可能类型键或 unknown"
+  }},
   "big_five_notes": [
     {{"trait": "Neuroticism|Extraversion|Agreeableness|Conscientiousness|Openness", "level": "low|mid|high|unknown", "note": ""}}
   ]
 }}
 
-要求：salient_traits 与 motivational_concerns 合计至少 4 条、至多 12 条；优先写**在文本中反复出现、区分度高**的行为—语言特征，不要堆砌类型学标签。"""
+要求：salient_traits 与 motivational_concerns 合计至少 4 条、至多 12 条；优先写**在文本中反复出现、区分度高**的行为—语言特征，不要堆砌类型学标签。
+私聊且存在明确对端时，**必须**填写 dyadic_relationship；群聊或无对端时 type 填 unknown、rationale 说明证据不足。"""
 
 
 def _clip_self_sample(self_texts: list[str], max_chars: int = 12000) -> str:
@@ -132,6 +177,50 @@ def _clip_self_sample(self_texts: list[str], max_chars: int = 12000) -> str:
         parts.append(line)
         n += len(line) + 1
     return "\n".join(parts) if parts else "（自己侧文本极少）"
+
+
+def normalize_relationship_type(raw_type: str, raw_zh: str = "") -> dict[str, Any]:
+    """将 LLM 输出的关系类型规范为 canonical key + 中文标签。"""
+    key = (raw_type or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if key in RELATIONSHIP_TYPE_ZH:
+        canon = key
+    else:
+        zh = (raw_zh or raw_type or "").strip()
+        canon = _RELATIONSHIP_ALIASES.get(zh, "unknown")
+        if canon == "unknown" and key:
+            for k in RELATIONSHIP_TYPE_ZH:
+                if k in key or key in k:
+                    canon = k
+                    break
+    type_zh = (raw_zh or "").strip() or RELATIONSHIP_TYPE_ZH.get(canon, "不确定")
+    if type_zh not in RELATIONSHIP_TYPE_ZH.values() and canon in RELATIONSHIP_TYPE_ZH:
+        type_zh = RELATIONSHIP_TYPE_ZH[canon]
+    return {"type": canon[:48], "type_zh": type_zh[:32]}
+
+
+def _parse_dyadic_relationship(llm: dict[str, Any]) -> dict[str, Any] | None:
+    raw = llm.get("dyadic_relationship")
+    if not isinstance(raw, dict):
+        return None
+    norm = normalize_relationship_type(
+        str(raw.get("type", "")),
+        str(raw.get("type_zh", "")),
+    )
+    try:
+        conf = float(raw.get("confidence", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        conf = 0.0
+    conf = round(min(1.0, max(0.0, conf)), 3)
+    alt = str(raw.get("alternative_type", "")).strip()
+    alt_norm = normalize_relationship_type(alt) if alt and alt.lower() != "unknown" else None
+    return {
+        **norm,
+        "confidence": conf,
+        "rationale": str(raw.get("rationale", ""))[:512],
+        "alternative_type": alt_norm["type"] if alt_norm else None,
+        "alternative_type_zh": alt_norm["type_zh"] if alt_norm else None,
+        "inference_source": "deepseek",
+    }
 
 
 def _parse_llm_payload(raw: str) -> dict[str, Any]:
@@ -293,6 +382,7 @@ def maybe_enrich_persona_digest(
     chat: str,
     is_group: bool,
     self_speaker_label: str,
+    counterparty_speaker_label: str = "",
     settings: Settings | None = None,
 ) -> dict[str, Any]:
     """若 DeepSeek 已配置则调用 LLM 覆盖摘要/MBTI/九型等；失败则原样返回并记录 meta。"""
@@ -300,10 +390,12 @@ def maybe_enrich_persona_digest(
     if not deepseek_configured(s):
         return digest
 
+    cp = (counterparty_speaker_label or "").strip() or "（未指定 / 群聊多方）"
     user_msg = _USER_TEMPLATE.format(
         chat=chat or "?",
         channel="群聊" if is_group else "私聊",
         self_label=self_speaker_label.strip(),
+        counterparty_label=cp,
         n_used=digest.get("messages_used", len(norm)),
         self_sample=_clip_self_sample(self_texts),
         exemplars_json=json.dumps(exemplars[:3], ensure_ascii=False)[:6000],
@@ -365,11 +457,23 @@ def maybe_enrich_persona_digest(
 
     sk = digest.get("social_relation_sketch")
     interp = llm.get("social_relation_interpretation")
-    if isinstance(sk, dict) and isinstance(interp, str) and interp.strip():
+    dyadic = _parse_dyadic_relationship(llm)
+    if isinstance(sk, dict):
         sk = dict(sk)
-        sk["interpretation"] = interp.strip()[:512]
-        sk["interpretation_source"] = "deepseek"
+        if isinstance(interp, str) and interp.strip():
+            sk["interpretation"] = interp.strip()[:512]
+            sk["interpretation_source"] = "deepseek"
+        if dyadic:
+            sk["dyadic_relation_type"] = dyadic["type"]
+            sk["dyadic_relation_type_zh"] = dyadic["type_zh"]
+            sk["dyadic_relation_confidence"] = dyadic["confidence"]
+            sk["dyadic_relation_rationale"] = dyadic["rationale"]
+            if dyadic.get("alternative_type"):
+                sk["dyadic_relation_alternative_type"] = dyadic["alternative_type"]
+                sk["dyadic_relation_alternative_type_zh"] = dyadic.get("alternative_type_zh")
         digest["social_relation_sketch"] = sk
+    if dyadic:
+        digest["dyadic_relationship"] = dyadic
 
     digest["salient_trait_observations"] = _normalize_salient_trait_rows(llm)
 
@@ -386,6 +490,7 @@ def maybe_enrich_persona_digest(
             "references_doc": "docs/PERSONA_INFERENCE_REFERENCES.md",
             "llm_review_protocol": rp,
             "salient_trait_count": len(digest.get("salient_trait_observations") or []),
+            "dyadic_relationship": dyadic,
         },
     )
     return digest

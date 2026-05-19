@@ -3,6 +3,8 @@ import { computed, onMounted, ref } from 'vue'
 
 import { downloadPersonaExport } from '@/api/personaExport.js'
 import { apiFetch, publicApiBase } from '@/api/http.js'
+import PoLoading from '@/components/PoLoading.vue'
+import PoLoadingOverlay from '@/components/PoLoadingOverlay.vue'
 
 const base = computed(() => publicApiBase())
 
@@ -11,6 +13,7 @@ const personsLoading = ref(false)
 const personsError = ref('')
 const exportSubjectId = ref('')
 const exportError = ref('')
+const exportLoading = ref(false)
 
 async function loadPersons() {
   personsError.value = ''
@@ -36,10 +39,13 @@ async function onExport(format) {
     exportError.value = '请先选择 Person'
     return
   }
+  exportLoading.value = true
   try {
     await downloadPersonaExport(sid, format)
   } catch (e) {
     exportError.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    exportLoading.value = false
   }
 }
 
@@ -135,6 +141,7 @@ onMounted(() => {
     </section>
 
     <section class="po-card export-panel">
+      <PoLoadingOverlay :show="personsLoading" label="正在加载 Person 列表…" />
       <h3>人格子图导出</h3>
       <p class="muted small">
         按 <code>Person.subject_id</code> 下载当前 <code>last_persona_batch_id</code> 下聚合的人格分析（非原始聊天 JSON）。与「图数据」页的子图可视化同源数据。
@@ -156,19 +163,21 @@ onMounted(() => {
         <div class="export-btns">
           <button
             type="button"
-            class="po-btn po-btn--primary po-btn--sm"
-            :disabled="!exportSubjectId.trim()"
+            class="po-btn po-btn--primary po-btn--sm po-btn--with-spinner"
+            :disabled="!exportSubjectId.trim() || exportLoading"
             @click="onExport('json')"
           >
-            下载 JSON
+            <PoLoading v-if="exportLoading" label="导出中…" size="sm" />
+            <template v-else>下载 JSON</template>
           </button>
           <button
             type="button"
-            class="po-btn po-btn--ghost po-btn--sm"
-            :disabled="!exportSubjectId.trim()"
+            class="po-btn po-btn--ghost po-btn--sm po-btn--with-spinner"
+            :disabled="!exportSubjectId.trim() || exportLoading"
             @click="onExport('text')"
           >
-            下载纯文本
+            <PoLoading v-if="exportLoading" label="导出中…" size="sm" />
+            <template v-else>下载纯文本</template>
           </button>
         </div>
       </div>

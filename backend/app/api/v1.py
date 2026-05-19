@@ -14,7 +14,9 @@ from app.deps import Neo4jDep
 from app.ingest.wx_cli import analyze_wx_cli_export_senders, ingest_wx_cli_export_json
 from app.config import get_settings
 from app.json_safe import json_safe
+from app.graph_context import build_graph_context_pack
 from app.llm.client import deepseek_configured
+from app.llm.persona_simulate import simulate_first_person
 from app.persona_export import (
     build_persona_export_bundle,
     format_persona_export_text,
@@ -63,6 +65,25 @@ class IngestRequest(BaseModel):
         default=True,
         description="微信导入时是否尝试 DeepSeek 增强（须 DEEPSEEK_ENABLED 与 API Key）",
     )
+    replace_previous_persona: bool = Field(
+        default=False,
+        description="为 True 时删除本体 Person 上一批 facet 后再写入（旧行为）；默认 False 为追加补充。",
+    )
+    peer_subject_id: str | None = Field(
+        default=None,
+        max_length=128,
+        description="会话中另一 Person 的 subject_id；与 peer_speaker_label 同时提供时建立 CONVERSATION_WITH 双向边",
+    )
+    peer_speaker_label: str | None = Field(
+        default=None,
+        max_length=128,
+        description="对方在 JSON messages[].sender 中的展示标签（须与预分析 sender 一致）",
+    )
+    peer_display_name: str | None = Field(default=None, max_length=256, description="对方 Person 展示名（可选）")
+    analyze_peer: bool = Field(
+        default=False,
+        description="为 True 且非群聊时，对 peer 再跑一套 digest 并写入对方子图（须同时提供 peer_*）",
+    )
 
     @field_validator("subject_id", mode="before")
     @classmethod
@@ -85,6 +106,12 @@ class IngestRequest(BaseModel):
                 "微信导入须填写「被分析对象 sender」（profiled_speaker_label）："
                 "其消息将用于人格画像；须与 JSON 里 sender 字段一致（本机多为 (空 sender)）。"
             )
+        ps = (self.peer_subject_id or "").strip() or None
+        pl = (self.peer_speaker_label or "").strip() or None
+        if bool(ps) ^ bool(pl):
+            raise ValueError("peer_subject_id 与 peer_speaker_label 须同时填写或同时留空。")
+        if ps and ps == self.subject_id.strip():
+            raise ValueError("peer_subject_id 不能与 subject_id 相同。")
         return self
 
 
@@ -101,6 +128,11 @@ def ingest_endpoint(neo4j: Neo4jDep, body: IngestRequest) -> dict[str, Any]:
             raw_text=body.raw_text or "",
             note=body.note,
             use_llm=body.use_llm,
+            replace_previous_persona=body.replace_previous_persona,
+            peer_subject_id=(body.peer_subject_id or "").strip() or None,
+            peer_speaker_label=(body.peer_speaker_label or "").strip() or None,
+            peer_display_name=(body.peer_display_name or "").strip() or None,
+            analyze_peer=body.analyze_peer,
         )
     return {
         "job_id": "stub-accepted",
@@ -124,6 +156,11 @@ async def ingest_chat_json_file(
     subject_display_name: str | None = Form(None),
     note: str | None = Form(None),
     use_llm: bool = Form(True),
+    replace_previous_persona: bool = Form(False),
+    peer_subject_id: str | None = Form(None),
+    peer_speaker_label: str | None = Form(None),
+    peer_display_name: str | None = Form(None),
+    analyze_peer: bool = Form(False),
 ) -> dict[str, Any]:
     """multipart 上传 JSON 聊天文件并写入 Person 特质子图。"""
     name = (file.filename or "").lower()
@@ -149,6 +186,11 @@ async def ingest_chat_json_file(
         raw_text=raw_text,
         note=(note or "").strip() or None,
         use_llm=use_llm,
+        replace_previous_persona=replace_previous_persona,
+        peer_subject_id=(peer_subject_id or "").strip() or None,
+        peer_speaker_label=(peer_speaker_label or "").strip() or None,
+        peer_display_name=(peer_display_name or "").strip() or None,
+        analyze_peer=analyze_peer,
     )
     result["upload"] = {"filename": file.filename, "bytes": len(raw)}
     return result
@@ -175,7 +217,8 @@ def list_persons(neo4j: Neo4jDep) -> dict[str, Any]:
     rows = neo4j.execute_read(
         """
         MATCH (p:Person)
-        RETURN p.subject_id AS subject_id,
+        RETURN coalesce(p.username, p.subject_id) AS subject_id,
+               coalesce(p.username, '') AS username,
                coalesce(p.display_name, '') AS display_name,
                p.last_persona_batch_id AS last_persona_batch_id,
                p.last_persona_analyzed_at AS last_analyzed,
@@ -191,6 +234,7 @@ def list_persons(neo4j: Neo4jDep) -> dict[str, Any]:
         items.append(
             {
                 "subject_id": str(sid).strip(),
+                "username": str(r.get("username") or sid or "").strip(),
                 "display_name": str(r.get("display_name") or "").strip(),
                 "last_persona_batch_id": json_safe(r.get("last_persona_batch_id")),
                 "last_persona_analyzed_at": json_safe(r.get("last_analyzed")),
@@ -208,7 +252,7 @@ def person_subgraph(neo4j: Neo4jDep, subject_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="subject_id 不能为空")
     rows = neo4j.execute_read(
         """
-        MATCH (p:Person {subject_id: $sid})
+        MATCH (p:Person) WHERE p.username = $sid OR p.subject_id = $sid
         OPTIONAL MATCH (p)-[r]->(n)
         WITH p, r, n
         WITH p,
@@ -217,6 +261,7 @@ def person_subgraph(neo4j: Neo4jDep, subject_id: str) -> dict[str, Any]:
                  WHEN r IS NULL THEN null
                  ELSE {
                    relationship: type(r),
+                   relationship_properties: properties(r),
                    target_element_id: elementId(n),
                    target_labels: labels(n),
                    target_properties: properties(n)
@@ -241,9 +286,11 @@ def person_subgraph(neo4j: Neo4jDep, subject_id: str) -> dict[str, Any]:
         if not rel:
             continue
         props = e.get("target_properties")
+        rel_props = e.get("relationship_properties")
         edges.append(
             {
                 "relationship": rel[:64],
+                "relationship_properties": json_safe(rel_props) if rel_props is not None else {},
                 "target_element_id": e.get("target_element_id"),
                 "target_labels": list(e.get("target_labels") or []),
                 "target_properties": json_safe(props) if props is not None else {},
@@ -308,13 +355,72 @@ def _persona_export_attachment_headers(subject_id: str, ext: str) -> dict[str, s
     return {"Content-Disposition": f'attachment; filename="{ascii_fn}"; filename*=UTF-8\'\'{star}'}
 
 
+class SimulateTurn(BaseModel):
+    role: str = Field(..., description="user | assistant")
+    content: str = Field(..., min_length=1, max_length=4000)
+
+
+class PersonSimulateBody(BaseModel):
+    user_message: str = Field(..., min_length=1, max_length=4000)
+    scenario: str | None = Field(
+        default=None,
+        max_length=512,
+        description="可选情境，如「对方问你最近忙什么」",
+    )
+    history: list[SimulateTurn] = Field(default_factory=list, max_length=20)
+
+    @field_validator("user_message", "scenario", mode="before")
+    @classmethod
+    def strip_text(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip()
+        return value
+
+
+@router.post("/person/{subject_id}/simulate")
+def person_simulate(
+    neo4j: Neo4jDep,
+    subject_id: str,
+    body: PersonSimulateBody,
+) -> dict[str, Any]:
+    """第一人称风格模拟：仅以该 Person 在 Neo4j 中的人格子图为依据（须配置 DeepSeek）。"""
+    if not deepseek_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="DeepSeek 未启用：请在 backend/.env 设置 DEEPSEEK_ENABLED=true 与 DEEPSEEK_API_KEY",
+        )
+    sid = subject_id.strip()
+    if not sid:
+        raise HTTPException(status_code=400, detail="subject_id 不能为空")
+    bundle = build_persona_export_bundle(neo4j, sid)
+    pack = build_graph_context_pack(bundle)
+    hist = [{"role": t.role, "content": t.content} for t in body.history]
+    try:
+        result = simulate_first_person(
+            context_pack=pack,
+            user_message=body.user_message,
+            scenario=body.scenario,
+            history=hist,
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return result
+
+
+@router.get("/simulate/status")
+def simulate_status() -> dict[str, Any]:
+    return {"deepseek_configured": deepseek_configured()}
+
+
 @router.get("/person/{subject_id}/persona-export")
 def persona_export_endpoint(
     neo4j: Neo4jDep,
     subject_id: str,
     format: str = Query("json", description="json | text（别名 txt）"),
 ) -> Response:
-    """按 Person.subject_id 导出当前 last_persona_batch_id 下的人格特质子图（非原始聊天 JSON）。"""
+    """按 Person.subject_id 导出人格特质子图（聚合全部导入批次；``persona_batch_id`` 为最近批次指针）。"""
     sid = subject_id.strip()
     if not sid:
         raise HTTPException(status_code=400, detail="subject_id 不能为空")

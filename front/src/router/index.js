@@ -4,6 +4,7 @@ import MainLayout from '@/layouts/MainLayout.vue'
 import ApiDocsView from '@/views/ApiDocsView.vue'
 import GraphView from '@/views/GraphView.vue'
 import ImportView from '@/views/ImportView.vue'
+import SimulateView from '@/views/SimulateView.vue'
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
@@ -22,6 +23,11 @@ const router = createRouter({
           path: 'graph',
           name: 'graph',
           component: GraphView,
+        },
+        {
+          path: 'simulate',
+          name: 'simulate',
+          component: SimulateView,
         },
         {
           path: 'api',

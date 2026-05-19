@@ -133,6 +133,18 @@ def normalize_chat_export(data: Any) -> dict[str, Any]:
     if not messages:
         raise HTTPException(status_code=400, detail="未解析到任何有效消息（需含 content/text 等字段）")
 
+    chat_username: str | None = None
+    group_sender_wxid_map: dict[str, str] = {}
+    if isinstance(data, dict):
+        from app.ingest.wx_identity import normalize_chat_username
+
+        chat_username = normalize_chat_username(data.get("username"))
+
+    if is_group:
+        from app.ingest.wx_group_members import mine_sender_wxid_from_messages
+
+        group_sender_wxid_map = mine_sender_wxid_from_messages(messages)
+
     return {
         "chat": chat,
         "is_group": is_group,
@@ -140,6 +152,8 @@ def normalize_chat_export(data: Any) -> dict[str, Any]:
         "source_format": source_format,
         "messages_raw_count": n_raw,
         "messages_normalized_count": len(messages),
+        "chat_username": chat_username,
+        "group_sender_wxid_map": group_sender_wxid_map,
     }
 
 

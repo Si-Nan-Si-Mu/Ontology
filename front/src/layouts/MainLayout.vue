@@ -20,6 +20,12 @@ const items = [
     subtitle: 'Person 子图可视化',
   },
   {
+    to: '/simulate',
+    name: 'simulate',
+    title: '风格模拟',
+    subtitle: '图约束第一人称对话',
+  },
+  {
     to: '/api',
     name: 'api',
     title: '开放接口',

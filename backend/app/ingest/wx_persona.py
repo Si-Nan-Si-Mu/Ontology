@@ -391,6 +391,9 @@ def build_persona_digest(
             chat=chat,
             is_group=is_group,
             self_speaker_label=display_sender_label(profiled_speaker_label),
+            counterparty_speaker_label=(
+                "" if is_group else display_sender_label(wx_me_sender_label)
+            ),
         )
 
     return digest

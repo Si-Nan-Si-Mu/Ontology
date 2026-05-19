@@ -27,6 +27,13 @@ class Settings(BaseSettings):
     wx_cli_command: str = "wx"
     wx_cli_timeout_sec: int = Field(default=120, ge=10, le=600)
 
+    # 本机微信 wxid（导出 JSON 中 sender 为空时的 Person 主键）；与对端根 username 区分，避免多会话合并到同一节点
+    wx_local_username: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("WX_LOCAL_USERNAME", "WX_ME_USERNAME"),
+        description="如 wxid_xxxxxxxx；分析「本机 sender / (空 sender)」人格时使用",
+    )
+
     # 单份聊天 JSON（wx-cli / 上传）允许的最大原始消息条数；规范化后仍一次性送入人格摘要
     wx_chat_import_max_messages: int = Field(
         default=100_000,
@@ -60,6 +67,15 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             return value
         return str(value)
+
+    @field_validator("wx_local_username", mode="before")
+    @classmethod
+    def empty_local_wx_to_none(cls, value: object) -> str | None:
+        if value is None or value == "":
+            return None
+        if isinstance(value, str):
+            return value.strip() or None
+        return str(value).strip() or None
 
 
 @lru_cache

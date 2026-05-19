@@ -28,7 +28,12 @@ classes:
         type: string
         required: true
         unique: true
-        description_zh: 系统内稳定主键 UUID
+        description_zh: 与 username 对齐的稳定主键（wx-cli 私聊多为对端 wxid）
+      username:
+        type: string
+        required: false
+        unique: true
+        description_zh: wx-cli 导出根字段 username，如 wxid_bhua3dlia7tu22
       display_name:
         type: string
         required: false

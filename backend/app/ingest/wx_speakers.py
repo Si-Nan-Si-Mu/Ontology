@@ -35,6 +35,36 @@ def display_sender_label(sender: str | None) -> str:
     return str(sender).strip()
 
 
+def infer_local_sender_ui_label(
+    chat: str,
+    speaker_ui_labels: list[str],
+    *,
+    is_group: bool,
+) -> str:
+    """推断 JSON 中哪一类 ``sender`` 展示行属于本机微信（与 ``WX_LOCAL_USERNAME`` 对应）。
+
+    默认遵循 wx-cli：``(空 sender)`` = 本机。若会话标题不在 sender 列表、且仅有
+    「空 + 一个昵称」（常见：本机在 sender 里显示微信昵称，对端消息 sender 为空），
+    则该昵称为本机行。
+    """
+    if is_group:
+        return EMPTY_SENDER_UI_LABEL
+    labels = [str(l) for l in speaker_ui_labels if str(l).strip()]
+    chat_name = (chat or "").strip()
+    has_empty = EMPTY_SENDER_UI_LABEL in labels
+    named = [l for l in labels if l != EMPTY_SENDER_UI_LABEL]
+
+    if chat_name and chat_name in labels:
+        return EMPTY_SENDER_UI_LABEL
+    if has_empty and len(named) == 1:
+        return named[0]
+    return EMPTY_SENDER_UI_LABEL
+
+
+def is_local_sender_ui_label(label: str, local_sender_ui_label: str) -> bool:
+    return (label or "").strip() == (local_sender_ui_label or "").strip()
+
+
 def suggest_private_chat_roles(
     chat: str,
     senders: list[dict[str, Any]],
@@ -53,26 +83,28 @@ def suggest_private_chat_roles(
     has_empty = EMPTY_SENDER_UI_LABEL in labels
     named = [s for s in senders if s.get("label") != EMPTY_SENDER_UI_LABEL and not s.get("is_session_alias")]
     chat_name = (chat or "").strip()
+    local_label = infer_local_sender_ui_label(chat_name, labels, is_group=False)
 
     profiled: str | None = None
-    me = EMPTY_SENDER_UI_LABEL
+    me = local_label
     hint: str | None = None
 
     if chat_name and chat_name in labels:
         profiled = chat_name
         if has_empty and chat_name != EMPTY_SENDER_UI_LABEL:
             me = EMPTY_SENDER_UI_LABEL
+        elif chat_name != local_label:
+            me = local_label
     elif has_empty and len(named) == 1:
         other = str(named[0]["label"])
-        # 会话名常为对方昵称/wxid 展示名，但 sender 里可能只有「空 + 另一昵称」
+        # 会话名为对端；对端消息多为 (空 sender)，本机为唯一具名 sender
         profiled = EMPTY_SENDER_UI_LABEL
         me = other
         if chat_name and chat_name not in labels:
             hint = (
-                f"会话「{chat_name}」未出现在 sender 字段中。"
-                f"wx-cli 私聊里「{EMPTY_SENDER_UI_LABEL}」与「{other}」二选一为对方消息时，"
-                f"若要对会话对象建 Person，请将被分析对象选为 {EMPTY_SENDER_UI_LABEL}，"
-                f"本机微信选为「{other}」（若实际相反请对调）。"
+                f"会话「{chat_name}」为聊天对象；其消息多在 JSON 的「{EMPTY_SENDER_UI_LABEL}」下，"
+                f"本机微信为「{other}」（主键见 backend/.env 的 WX_LOCAL_USERNAME）。"
+                f"分析对方时请选「{EMPTY_SENDER_UI_LABEL}」或会话别名；分析自己请选「{other}」。"
             )
     elif len(named) >= 2:
         profiled = str(named[0]["label"])

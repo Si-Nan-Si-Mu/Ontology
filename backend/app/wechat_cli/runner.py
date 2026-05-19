@@ -113,6 +113,26 @@ def run_wx_export_json_with_retries(
             time.sleep(0.35 * (attempt + 1))
 
 
+def fetch_group_members_json(
+    *,
+    wx_command: str,
+    chat: str,
+    timeout_sec: int,
+) -> list[dict[str, Any]]:
+    """``wx members <CHAT> --json`` → 群成员列表。"""
+    chat = validate_export_chat_name(chat)
+    data = run_wx_json(
+        wx_command=wx_command,
+        args=["members", chat, "--json"],
+        timeout_sec=timeout_sec,
+    )
+    if isinstance(data, list):
+        return [x for x in data if isinstance(x, dict)]
+    if isinstance(data, dict) and isinstance(data.get("members"), list):
+        return [x for x in data["members"] if isinstance(x, dict)]
+    raise HTTPException(status_code=502, detail="wx members --json 结构非预期（应为数组）")
+
+
 def export_chat_json(
     *,
     wx_command: str,

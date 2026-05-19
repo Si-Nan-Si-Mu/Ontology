@@ -6,7 +6,7 @@ import shutil
 from typing import Any
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.config import get_settings
 from app.deps import Neo4jDep
@@ -138,6 +138,11 @@ class WechatSessionImportBody(BaseModel):
     limit: int = Field(default=500, ge=1, le=ABSOLUTE_MESSAGE_LIST_CAP)
     note: str | None = Field(default=None, max_length=512)
     use_llm: bool = True
+    replace_previous_persona: bool = False
+    peer_subject_id: str | None = Field(default=None, max_length=128)
+    peer_speaker_label: str | None = Field(default=None, max_length=128)
+    peer_display_name: str | None = Field(default=None, max_length=256)
+    analyze_peer: bool = False
 
     @field_validator("subject_id", "profiled_speaker_label", "chat", mode="before")
     @classmethod
@@ -145,6 +150,29 @@ class WechatSessionImportBody(BaseModel):
         if isinstance(value, str):
             return value.strip()
         return value
+
+    @field_validator("peer_subject_id", "peer_speaker_label", "peer_display_name", mode="before")
+    @classmethod
+    def strip_peer(cls, value: object) -> object:
+        if isinstance(value, str):
+            v = value.strip()
+            return v or None
+        return value
+
+    def peer_pair_ok(self) -> bool:
+        ps = (self.peer_subject_id or "").strip() or None
+        pl = (self.peer_speaker_label or "").strip() or None
+        return bool(ps and pl)
+
+    @model_validator(mode="after")
+    def validate_peer_pair(self):
+        ps = (self.peer_subject_id or "").strip() or None
+        pl = (self.peer_speaker_label or "").strip() or None
+        if bool(ps) ^ bool(pl):
+            raise ValueError("peer_subject_id 与 peer_speaker_label 须同时填写或同时省略")
+        if ps and ps == self.subject_id.strip():
+            raise ValueError("peer_subject_id 不能与 subject_id 相同")
+        return self
 
 
 @router.post("/import-from-session")
@@ -161,7 +189,7 @@ def wechat_import_from_session(
         limit=lim,
         timeout_sec=s.wx_cli_timeout_sec,
     )
-    return ingest_wx_cli_export_json(
+    out = ingest_wx_cli_export_json(
         neo4j,
         subject_id=body.subject_id,
         subject_display_name=body.subject_display_name,
@@ -171,4 +199,15 @@ def wechat_import_from_session(
         raw_text=raw_text,
         note=body.note,
         use_llm=body.use_llm,
+        replace_previous_persona=body.replace_previous_persona,
+        peer_subject_id=body.peer_subject_id if body.peer_pair_ok() else None,
+        peer_speaker_label=body.peer_speaker_label if body.peer_pair_ok() else None,
+        peer_display_name=body.peer_display_name,
+        analyze_peer=body.analyze_peer,
     )
+    wx = out.get("wx_cli")
+    if isinstance(wx, dict):
+        wx = dict(wx)
+        wx["export_limit_requested"] = lim
+        out["wx_cli"] = wx
+    return out

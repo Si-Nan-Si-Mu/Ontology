@@ -57,3 +57,29 @@ def chat_json(
     if not content or not content.strip():
         raise RuntimeError("DeepSeek 返回空内容")
     return content.strip()
+
+
+def chat_text(
+    *,
+    messages: list[dict[str, str]],
+    model: str | None = None,
+) -> str:
+    """调用 DeepSeek chat/completions，返回纯文本（用于第一人称模拟等）。"""
+    settings = get_settings()
+    client = get_deepseek_client()
+    if client is None:
+        raise RuntimeError("DeepSeek 未配置：请设置 DEEPSEEK_API_KEY 与 DEEPSEEK_ENABLED=true")
+
+    kwargs: dict = {
+        "model": model or settings.deepseek_model,
+        "messages": messages,
+        "stream": False,
+    }
+    if settings.deepseek_thinking_enabled:
+        kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
+
+    resp = client.chat.completions.create(**kwargs)
+    content = resp.choices[0].message.content
+    if not content or not content.strip():
+        raise RuntimeError("DeepSeek 返回空内容")
+    return content.strip()

@@ -58,6 +58,7 @@ OpenAPI：`http://127.0.0.1:8000/docs`。
 - **人格特质子图写入 Neo4j**：摘要、表达风格、口癖、情绪维度、社会关系草图、大五/MBTI/九型占位或 LLM 假设、典型对话片段、分析元数据、**显著特质**（`SalientTraitObservation`）等。  
 - **Person 子图与可视化**：`GET /api/v1/persons`、`GET /api/v1/person/{subject_id}/subgraph`（前端「图数据」页按 Person 查阅）；`GET /api/v1/graph/nodes` 全库节点分页（调试）。  
 - **结果导出**：`GET /api/v1/person/{subject_id}/persona-export?format=json|text`（开放接口页按 Person 下载）。  
+- **第一人称风格模拟**（须 DeepSeek）：`POST /api/v1/person/{subject_id}/simulate`；前端「风格模拟」页。  
 - **清空开发库**：在已激活的 conda 环境（或 venv）下于 `backend` 目录执行 `python scripts/neo4j_wipe.py --dry-run` / `--yes`（详见运维文档）。
 
 ## 文档索引
@@ -65,11 +66,11 @@ OpenAPI：`http://127.0.0.1:8000/docs`。
 | 文档 | 说明 |
 |------|------|
 | [`docs/OPERATIONS.md`](docs/OPERATIONS.md) | **操作指引**：前后端启动、Neo4j 连接确认、清空库 |
-| [`docs/PROJECT_BRIEF.md`](docs/PROJECT_BRIEF.md) | 项目简报、定位与创新点 |
-| [`docs/TECH_SPEC.md`](docs/TECH_SPEC.md) | API 与架构规格、约束与验收方向 |
+| [`docs/PROJECT_BRIEF.md`](docs/PROJECT_BRIEF.md) | 项目简报、定位与创新点、跨领域效用（信用与可解释治理 / 心理科技辅助 / 社工防御） |
+| [`docs/TECH_SPEC.md`](docs/TECH_SPEC.md) | API 与架构规格、**§7 安全与合规**、第一层图约束 LLM（§5.9） |
 | [`docs/WECHAT_WX_CLI.md`](docs/WECHAT_WX_CLI.md) | 本机 wx-cli 集成与安全注意 |
 | [`docs/PERSONA_INFERENCE_REFERENCES.md`](docs/PERSONA_INFERENCE_REFERENCES.md) | 文本人格推断文献与使用边界 |
-| [`docs/ETHICS_AND_DATA.md`](docs/ETHICS_AND_DATA.md) | 伦理与数据处理原则 |
+| [`docs/ETHICS_AND_DATA.md`](docs/ETHICS_AND_DATA.md) | 伦理与数据处理原则、信用/临床/社工相关红线 |
 | [`docs/PRESENTATION_SHOWCASE.md`](docs/PRESENTATION_SHOWCASE.md) | **展演文档**：内容、目的、演示流程、未来方向、伦理与 Q&A |
 | [`docs/PITCH_ONE_PAGER.md`](docs/PITCH_ONE_PAGER.md) | 一页纸答辩结构 |
 | [`docs/BRAND_AND_TRADEMARK.md`](docs/BRAND_AND_TRADEMARK.md) | **商业 IP / 品牌与商标**（命名、尼斯分类、VI、图形标 `docs/brand/pog-mark.svg`） |
